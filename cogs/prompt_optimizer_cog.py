@@ -237,7 +237,7 @@ class RedoButton(discord.ui.Button["OptimizeView"]):
     def __init__(
         self, converser_cog, image_service_cog, deletion_queue, custom_api_key=None
     ):
-        super().__init__(style=discord.ButtonStyle.danger, label="Retry")
+        super().__init__(style=discord.ButtonStyle.danger, label="🔄 Retry")
         self.converser_cog = converser_cog
         self.image_service_cog = image_service_cog
         self.deletion_queue = deletion_queue
