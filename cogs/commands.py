@@ -26,6 +26,7 @@ class Commands(discord.Cog, name="Commands"):
         image_draw_cog,
         image_service_cog,
         moderations_cog,
+        index_cog,
         translations_cog=None,
         search_cog=None,
     ):
@@ -39,6 +40,7 @@ class Commands(discord.Cog, name="Commands"):
         self.image_draw_cog = image_draw_cog
         self.image_service_cog = image_service_cog
         self.moderations_cog = moderations_cog
+        self.index_cog = index_cog
         self.translations_cog = translations_cog
         self.search_cog = search_cog
 
@@ -66,6 +68,12 @@ class Commands(discord.Cog, name="Commands"):
         description="AI-Moderation commands for the bot",
         guild_ids=ALLOWED_GUILDS,
         checks=[Check.check_admin_roles()],
+    )
+    index = discord.SlashCommandGroup(
+        name="index",
+        description="Custom index commands for the bot",
+        guild_ids=ALLOWED_GUILDS,
+        checks=[Check.check_index_roles()],
     )
 
     #
@@ -513,6 +521,143 @@ class Commands(discord.Cog, name="Commands"):
         await self.converser_cog.end_command(ctx)
 
     #
+    # Index commands
+    #
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="load",
+        description="Select one of your saved indexes to query from",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="user_index",
+        description="Which user file to load the index from",
+        required=False,
+        autocomplete=File_autocompleter.get_user_indexes,
+    )
+    @discord.option(
+        name="server_index",
+        description="Which server file to load the index from",
+        required=False,
+        autocomplete=File_autocompleter.get_server_indexes,
+    )
+    async def load_index(
+        self, ctx: discord.ApplicationContext, user_index: str, server_index: str
+    ):
+        await self.index_cog.load_index_command(ctx, user_index, server_index)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="add", description="Add an index to query from", guild_ids=ALLOWED_GUILDS
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="file",
+        description="A file to create the index from",
+        required=False,
+        input_type=discord.SlashCommandOptionType.attachment,
+    )
+    @discord.option(
+        name="link",
+        description="A link to a file to a webpage ",
+        required=False,
+        input_type=str,
+    )
+    async def set_file(
+        self, ctx: discord.ApplicationContext, file: discord.Attachment, link: str
+    ):
+        await self.index_cog.set_index_command(ctx, file, link)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="reset",
+        description="Reset (delete) all of your saved indexes",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    async def reset(self, ctx: discord.ApplicationContext):
+        await self.index_cog.reset_command(ctx)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="compose",
+        description="Combine multiple indexes together",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.option(
+        name="name",
+        description="The name of the new index",
+        required=False,
+        input_type=discord.SlashCommandOptionType.string,
+    )
+    @discord.guild_only()
+    async def compose(self, ctx: discord.ApplicationContext, name: str):
+        await self.index_cog.compose_command(ctx, name)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="add_discord",
+        description="Set a index from a discord channel",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="channel",
+        description="A channel to create the index from",
+        required=False,
+        input_type=discord.SlashCommandOptionType.channel,
+    )
+    async def set_discord(
+        self, ctx: discord.ApplicationContext, channel: discord.TextChannel
+    ):
+        await self.index_cog.set_discord_command(ctx, channel)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="discord_backup",
+        description="Save an index made from the whole server",
+        guild_ids=ALLOWED_GUILDS,
+        checks=[Check.check_admin_roles(), Check.check_index_roles()],
+    )
+    @discord.guild_only()
+    async def discord_backup(self, ctx: discord.ApplicationContext):
+        await self.index_cog.discord_backup_command(ctx)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="query", description="Query from your index", guild_ids=ALLOWED_GUILDS
+    )
+    @discord.guild_only()
+    @discord.option(name="query", description="What to query the index", required=True)
+    @discord.option(
+        name="nodes",
+        description="How many nodes should the response be queried from, only non-deep indexes",
+        required=False,
+        default=1,
+        min_value=1,
+        max_value=3,
+        input_type=discord.SlashCommandOptionType.integer,
+    )
+    @discord.option(
+        name="response_mode",
+        description="Response mode, doesn't work on deep composed indexes",
+        guild_ids=ALLOWED_GUILDS,
+        required=False,
+        default="default",
+        choices=["default", "compact", "tree_summarize"],
+    )
+    async def query(
+        self,
+        ctx: discord.ApplicationContext,
+        query: str,
+        nodes: int,
+        response_mode: str,
+    ):
+        await self.index_cog.query_command(ctx, query, nodes, response_mode)
+
+    #
     # DALLE commands
     #
 
@@ -687,7 +832,24 @@ class Commands(discord.Cog, name="Commands"):
         guild_ids=ALLOWED_GUILDS,
     )
     @discord.option(name="query", description="The query to search", required=True)
+    @discord.option(
+        name="scope",
+        description="How many top links to use for context",
+        required=False,
+        input_type=discord.SlashCommandOptionType.integer,
+        max_value=6,
+        min_value=1,
+    )
+    @discord.option(
+        name="nodes",
+        description="The higher the number, the more accurate the results, but more expensive",
+        required=False,
+        input_type=discord.SlashCommandOptionType.integer,
+        max_value=4,
+        min_value=1,
+    )
     @discord.guild_only()
-    async def search(self, ctx: discord.ApplicationContext, query: str):
-        await ctx.respond("Not implemented yet")
-        # await self.search_cog.search_command(ctx, query)
+    async def search(
+        self, ctx: discord.ApplicationContext, query: str, scope: int, nodes: int
+    ):
+        await self.search_cog.search_command(ctx, query, scope, nodes)
