@@ -249,6 +249,26 @@ class EnvService:
             return False
 
     @staticmethod
+    def get_premoderate():
+        try:
+            pre_moderate = os.getenv("PRE_MODERATE")
+            if pre_moderate.lower().strip() == "true":
+                return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def get_force_english():
+        try:
+            force_english = os.getenv("FORCE_ENGLISH")
+            if force_english.lower().strip() == "true":
+                return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
     def get_custom_bot_name():
         try:
             custom_bot_name = os.getenv("CUSTOM_BOT_NAME") + ": "
@@ -351,3 +371,11 @@ class EnvService:
             return google_search_engine_id
         except Exception:
             return None
+
+    @staticmethod
+    def get_pinecone_region():
+        try:
+            pinecone_region = os.getenv("PINECONE_REGION")
+            return pinecone_region
+        except Exception:
+            return "us-west1-gcp"

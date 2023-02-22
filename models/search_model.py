@@ -4,7 +4,9 @@ import random
 import re
 import tempfile
 import traceback
+from datetime import datetime, date
 from functools import partial
+from pathlib import Path
 
 import discord
 from bs4 import BeautifulSoup
@@ -19,6 +21,7 @@ from gpt_index import (
     OpenAIEmbedding,
     SimpleDirectoryReader,
 )
+from gpt_index.indices.knowledge_graph import GPTKnowledgeGraphIndex
 from gpt_index.readers.web import DEFAULT_WEBSITE_EXTRACTOR
 from langchain import OpenAI
 
@@ -45,6 +48,72 @@ class Search:
         self.openai_key = os.getenv("OPENAI_TOKEN")
         self.EMBED_CUTOFF = 2000
 
+    def add_search_index(self, index, user_id, query):
+        # Create a folder called "indexes/{USER_ID}" if it doesn't exist already
+        Path(f"{app_root_path()}/indexes/{user_id}_search").mkdir(
+            parents=True, exist_ok=True
+        )
+        # Save the index to file under the user id
+        file = f"{query[:20]}_{date.today().month}_{date.today().day}"
+
+        index.save_to_disk(
+            app_root_path() / "indexes" / f"{str(user_id)}_search" / f"{file}.json"
+        )
+
+    def build_search_started_embed(self):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refining google search query...",
+            color=0x00FF00,
+        )
+        return embed
+
+    def build_search_refined_embed(self, refined_query):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refined query: "
+            + refined_query
+            + "\n\nRetrieving links from google...",
+            color=0x00FF00,
+        )
+        return embed
+
+    def build_search_links_retrieved_embed(self, refined_query):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refined query: "
+            + refined_query
+            + "\n\nRetrieved links from Google\n\n"
+            "Retrieving webpages...",
+            color=0x00FF00,
+        )
+        return embed
+
+    def build_search_webpages_retrieved_embed(self, refined_query):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refined query: "
+            + refined_query
+            + "\n\nRetrieved links from Google\n\n"
+            "Retrieved webpages\n\n"
+            "Indexing...",
+            color=0x00FF00,
+        )
+        return embed
+
+    def build_search_indexed_embed(self, refined_query):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refined query: "
+            + refined_query
+            + "\n\nRetrieved links from Google\n\n"
+            "Retrieved webpages\n\n"
+            "Indexed\n\n"
+            "Thinking about your question...",
+            color=0x00FF00,
+        )
+        return embed
+
     def index_webpage(self, url) -> list[Document]:
         documents = BeautifulSoupWebReader(
             website_extractor=DEFAULT_WEBSITE_EXTRACTOR
@@ -65,6 +134,8 @@ class Search:
         # Get the file path of this tempfile.NamedTemporaryFile
         # Save this temp file to an actual file that we can put into something else to read it
         documents = SimpleDirectoryReader(input_files=[f.name]).load_data()
+        for document in documents:
+            document.extra_info = {"URL": url}
         print("Loaded the PDF document data")
 
         # Delete the temporary file
@@ -90,25 +161,56 @@ class Search:
                     )
                     return ["An error occurred while searching.", None]
 
-    async def search(self, query, user_api_key, search_scope, nodes):
+    async def try_edit(self, message, embed):
+        try:
+            await message.edit(embed=embed)
+        except Exception:
+            traceback.print_exc()
+            pass
+
+    async def try_delete(self, message):
+        try:
+            await message.delete()
+        except Exception:
+            traceback.print_exc()
+            pass
+
+    async def search(
+        self,
+        ctx: discord.ApplicationContext,
+        query,
+        user_api_key,
+        search_scope,
+        nodes,
+        deep,
+        redo=None,
+    ):
         DEFAULT_SEARCH_NODES = 1
         if not user_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_key
         else:
             os.environ["OPENAI_API_KEY"] = user_api_key
 
+        if ctx:
+            in_progress_message = (
+                await ctx.respond(embed=self.build_search_started_embed())
+                if not redo
+                else await ctx.channel.send(embed=self.build_search_started_embed())
+            )
+
         llm_predictor = LLMPredictor(llm=OpenAI(model_name="text-davinci-003"))
         try:
             llm_predictor_presearch = OpenAI(
-                max_tokens=30, temperature=0, model_name="text-davinci-003"
+                max_tokens=50,
+                temperature=0.25,
+                presence_penalty=0.65,
+                model_name="text-davinci-003",
             )
 
             # Refine a query to send to google custom search API
             query_refined = llm_predictor_presearch.generate(
                 prompts=[
-                    "You are refining a query to send to the Google Custom Search API. Change the query such that putting it into the Google Custom Search API will return the most relevant websites to assist us in answering the original query. Respond with only the refined query for the original query. Don't use punctuation or quotation marks. The original query is: "
-                    + query
-                    + "\nRefined Query:"
+                    f"You are to be given a search query for google. Change the query such that putting it into the Google Custom Search API will return the most relevant websites to assist in answering the original query. If the original query is inferring knowledge about the current day, insert the current day into the refined prompt. If the original query is inferring knowledge about the current month, insert the current month and year into the refined prompt. If the original query is inferring knowledge about the current year, insert the current year into the refined prompt. Generally, if the original query is inferring knowledge about something that happened recently, insert the current month into the refined query. Avoid inserting a day, month, or year for queries that purely ask about facts and about things that don't have much time-relevance. The current date is {str(datetime.now().date())}. Do not insert the current date if not neccessary. Respond with only the refined query for the original query. Don’t use punctuation or quotation marks.\n\nExamples:\n---\nOriginal Query: ‘Who is Harald Baldr?’\nRefined Query: ‘Harald Baldr biography’\n---\nOriginal Query: ‘What happened today with the Ohio train derailment?’\nRefined Query: ‘Ohio train derailment details {str(datetime.now().date())}’\n---\nOriginal Query: ‘Is copper in drinking water bad for you?’\nRefined Query: ‘copper in drinking water adverse effects’\n---\nOriginal Query: What's the current time in Mississauga?\nRefined Query: current time Mississauga\nNow, refine the user input query.\nOriginal Query: {query}\nRefined Query:"
                 ]
             )
             query_refined_text = query_refined.generations[0][0].text
@@ -116,11 +218,22 @@ class Search:
             traceback.print_exc()
             query_refined_text = query
 
+        if ctx:
+            await self.try_edit(
+                in_progress_message, self.build_search_refined_embed(query_refined_text)
+            )
+
         # Get the links for the query
-        print("The refined search is " + query_refined_text)
         links, all_links = await self.get_links(
             query_refined_text, search_scope=search_scope
         )
+
+        if ctx:
+            await self.try_edit(
+                in_progress_message,
+                self.build_search_links_retrieved_embed(query_refined_text),
+            )
+
         if all_links is None:
             raise ValueError("The Google Search API returned an error.")
 
@@ -181,39 +294,97 @@ class Search:
             except Exception as e:
                 traceback.print_exc()
 
+        if ctx:
+            await self.try_edit(
+                in_progress_message,
+                self.build_search_webpages_retrieved_embed(query_refined_text),
+            )
+
         embedding_model = OpenAIEmbedding()
-
-        index = await self.loop.run_in_executor(
-            None, partial(GPTSimpleVectorIndex, documents, embed_model=embedding_model)
-        )
-
-        await self.usage_service.update_usage(
-            embedding_model.last_token_usage, embeddings=True
-        )
 
         llm_predictor = LLMPredictor(
             llm=OpenAI(model_name="text-davinci-003", max_tokens=-1)
         )
 
+        if not deep:
+            index = await self.loop.run_in_executor(
+                None,
+                partial(GPTSimpleVectorIndex, documents, embed_model=embedding_model),
+            )
+            # save the index to disk if not a redo
+            if not redo:
+                self.add_search_index(
+                    index,
+                    ctx.user.id
+                    if isinstance(ctx, discord.ApplicationContext)
+                    else ctx.author.id,
+                    query,
+                )
+        else:
+            print("Doing a deep search")
+            llm_predictor_deep = LLMPredictor(
+                llm=OpenAI(model_name="text-davinci-002", temperature=0, max_tokens=-1)
+            )
+            index = await self.loop.run_in_executor(
+                None,
+                partial(
+                    GPTKnowledgeGraphIndex,
+                    documents,
+                    chunk_size_limit=512,
+                    max_triplets_per_chunk=2,
+                    embed_model=embedding_model,
+                    llm_predictor=llm_predictor_deep,
+                ),
+            )
+            await self.usage_service.update_usage(
+                embedding_model.last_token_usage, embeddings=True
+            )
+            await self.usage_service.update_usage(
+                llm_predictor_deep.last_token_usage, embeddings=False
+            )
+
+        if ctx:
+            await self.try_edit(
+                in_progress_message, self.build_search_indexed_embed(query_refined_text)
+            )
+
+        await self.usage_service.update_usage(
+            embedding_model.last_token_usage, embeddings=True
+        )
+
         # Now we can search the index for a query:
         embedding_model.last_token_usage = 0
 
-        response = await self.loop.run_in_executor(
-            None,
-            partial(
-                index.query,
-                query,
-                verbose=True,
-                embed_model=embedding_model,
-                llm_predictor=llm_predictor,
-                similarity_top_k=nodes or DEFAULT_SEARCH_NODES,
-                text_qa_template=self.qaprompt,
-            ),
-        )
+        if not deep:
+            response = await self.loop.run_in_executor(
+                None,
+                partial(
+                    index.query,
+                    query,
+                    embed_model=embedding_model,
+                    llm_predictor=llm_predictor,
+                    similarity_top_k=nodes or DEFAULT_SEARCH_NODES,
+                    text_qa_template=self.qaprompt,
+                ),
+            )
+        else:
+            response = await self.loop.run_in_executor(
+                None,
+                partial(
+                    index.query,
+                    query,
+                    include_text=True,
+                    embed_model=embedding_model,
+                    llm_predictor=llm_predictor_deep,
+                ),
+            )
 
         await self.usage_service.update_usage(llm_predictor.last_token_usage)
         await self.usage_service.update_usage(
             embedding_model.last_token_usage, embeddings=True
         )
 
-        return response
+        if ctx:
+            await self.try_delete(in_progress_message)
+
+        return response, query_refined_text

@@ -11,8 +11,10 @@ from services.deletion_service import Deletion
 from models.openai_model import Model, Override
 from models.user_model import EmbeddedConversationItem, RedoUser
 from services.environment_service import EnvService
+from services.moderations_service import Moderation
 
 BOT_NAME = EnvService.get_custom_bot_name()
+PRE_MODERATE = EnvService.get_premoderate()
 
 
 class TextService:
@@ -38,6 +40,7 @@ class TextService:
         redo_request=False,
         from_ask_action=False,
         from_other_action=None,
+        from_message_context=None,
     ):
         """General service function for sending and receiving gpt generations
 
@@ -288,7 +291,9 @@ class TextService:
                 str(response["choices"][0]["text"])
             )
 
-            if from_other_action:
+            if from_message_context:
+                response_text = f"{response_text}"
+            elif from_other_action:
                 response_text = f"***{from_other_action}*** {response_text}"
             elif from_ask_command or from_ask_action:
                 response_text = f"***{prompt}***{response_text}"
@@ -530,6 +535,14 @@ class TextService:
             return
 
         if conversing:
+            # Pre-moderation check
+            if PRE_MODERATE:
+                if await Moderation.simple_moderate_and_respond(
+                    message.content, message
+                ):
+                    await message.delete()
+                    return
+
             user_api_key = None
             if USER_INPUT_API_KEYS:
                 user_api_key = await TextService.get_user_api_key(
@@ -540,7 +553,8 @@ class TextService:
 
             prompt = await converser_cog.mention_to_username(message, content)
 
-            await converser_cog.check_conversation_limit(message)
+            if await converser_cog.check_conversation_limit(message):
+                return
 
             # If the user is in a conversation thread
             if message.channel.id in converser_cog.conversation_threads:
@@ -794,8 +808,8 @@ class EndConvoButton(discord.ui.Button["ConversationView"]):
         user_id = interaction.user.id
         if (
             user_id in self.converser_cog.conversation_thread_owners
-            and self.converser_cog.conversation_thread_owners[user_id]
-            == interaction.channel.id
+            and interaction.channel.id
+            in self.converser_cog.conversation_thread_owners[user_id]
         ):
             try:
                 await self.converser_cog.end_conversation(

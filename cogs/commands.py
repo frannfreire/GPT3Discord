@@ -543,10 +543,23 @@ class Commands(discord.Cog, name="Commands"):
         required=False,
         autocomplete=File_autocompleter.get_server_indexes,
     )
+    @discord.option(
+        name="search_index",
+        description="Which search index file to load the index from",
+        required=False,
+        autocomplete=File_autocompleter.get_user_search_indexes,
+    )
     async def load_index(
-        self, ctx: discord.ApplicationContext, user_index: str, server_index: str
+        self,
+        ctx: discord.ApplicationContext,
+        user_index: str,
+        server_index: str,
+        search_index: str,
     ):
-        await self.index_cog.load_index_command(ctx, user_index, server_index)
+        await ctx.defer()
+        await self.index_cog.load_index_command(
+            ctx, user_index, server_index, search_index
+        )
 
     @add_to_group("index")
     @discord.slash_command(
@@ -655,6 +668,7 @@ class Commands(discord.Cog, name="Commands"):
         nodes: int,
         response_mode: str,
     ):
+        await ctx.defer()
         await self.index_cog.query_command(ctx, query, nodes, response_mode)
 
     #
@@ -837,7 +851,7 @@ class Commands(discord.Cog, name="Commands"):
         description="How many top links to use for context",
         required=False,
         input_type=discord.SlashCommandOptionType.integer,
-        max_value=6,
+        max_value=16,
         min_value=1,
     )
     @discord.option(
@@ -845,11 +859,22 @@ class Commands(discord.Cog, name="Commands"):
         description="The higher the number, the more accurate the results, but more expensive",
         required=False,
         input_type=discord.SlashCommandOptionType.integer,
-        max_value=4,
+        max_value=5,
         min_value=1,
+    )
+    @discord.option(
+        name="deep",
+        description="Do a more intensive, long-running search",
+        required=False,
+        input_type=discord.SlashCommandOptionType.boolean,
     )
     @discord.guild_only()
     async def search(
-        self, ctx: discord.ApplicationContext, query: str, scope: int, nodes: int
+        self,
+        ctx: discord.ApplicationContext,
+        query: str,
+        scope: int,
+        nodes: int,
+        deep: bool,
     ):
-        await self.search_cog.search_command(ctx, query, scope, nodes)
+        await self.search_cog.search_command(ctx, query, scope, nodes, deep)

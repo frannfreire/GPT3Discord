@@ -1,4 +1,5 @@
 import os
+import random
 import tempfile
 import traceback
 import asyncio
@@ -33,6 +34,7 @@ from gpt_index import (
     PromptHelper,
     IndexStructType,
     OpenAIEmbedding,
+    GithubRepositoryReader,
 )
 from gpt_index.readers.web import DEFAULT_WEBSITE_EXTRACTOR
 
@@ -52,7 +54,6 @@ def get_and_query(
     if isinstance(index, GPTTreeIndex):
         response = index.query(
             query,
-            verbose=True,
             child_branch_factor=2,
             llm_predictor=llm_predictor,
             embed_model=embed_model,
@@ -61,7 +62,6 @@ def get_and_query(
         response = index.query(
             query,
             response_mode=response_mode,
-            verbose=True,
             llm_predictor=llm_predictor,
             embed_model=embed_model,
             similarity_top_k=nodes,
@@ -98,11 +98,13 @@ class IndexData:
         # Create a folder called "indexes/{USER_ID}" if it doesn't exist already
         Path(f"{app_root_path()}/indexes/{user_id}").mkdir(parents=True, exist_ok=True)
         # Save the index to file under the user id
+        file = f"{file_name}_{date.today().month}_{date.today().day}"
+        # If file is > 93 in length, cut it off to 93
+        if len(file) > 93:
+            file = file[:93]
+
         index.save_to_disk(
-            app_root_path()
-            / "indexes"
-            / f"{str(user_id)}"
-            / f"{file_name}_{date.today().month}_{date.today().day}.json"
+            app_root_path() / "indexes" / f"{str(user_id)}" / f"{file}.json"
         )
 
     def reset_indexes(self, user_id):
@@ -169,22 +171,6 @@ class Index_handler:
         index = GPTSimpleVectorIndex(document, embed_model=embed_model)
         return index
 
-    async def index_web_pdf(self, url, embed_model) -> GPTSimpleVectorIndex:
-        print("Indexing a WEB PDF")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.read()
-                    f = tempfile.NamedTemporaryFile(delete=False)
-                    f.write(data)
-                    f.close()
-                else:
-                    return "An error occurred while downloading the PDF."
-
-        document = SimpleDirectoryReader(input_files=[f.name]).load_data()
-        index = GPTSimpleVectorIndex(document, embed_model=embed_model)
-        return index
-
     def index_gdoc(self, doc_id, embed_model) -> GPTSimpleVectorIndex:
         document = GoogleDocsReader().load_data(doc_id)
         index = GPTSimpleVectorIndex(document, embed_model=embed_model)
@@ -192,6 +178,27 @@ class Index_handler:
 
     def index_youtube_transcript(self, link, embed_model):
         documents = YoutubeTranscriptReader().load_data(ytlinks=[link])
+        index = GPTSimpleVectorIndex(
+            documents,
+            embed_model=embed_model,
+        )
+        return index
+
+    def index_github_repository(self, link, embed_model):
+        print("indexing github repo")
+        # Extract the "owner" and the "repo" name from the github link.
+        owner = link.split("/")[3]
+        repo = link.split("/")[4]
+
+        try:
+            documents = GithubRepositoryReader(owner=owner, repo=repo).load_data(
+                branch="main"
+            )
+        except KeyError:
+            documents = GithubRepositoryReader(owner=owner, repo=repo).load_data(
+                branch="master"
+            )
+
         index = GPTSimpleVectorIndex(
             documents,
             embed_model=embed_model,
@@ -212,7 +219,47 @@ class Index_handler:
         )
         return index
 
-    def index_webpage(self, url, embed_model) -> GPTSimpleVectorIndex:
+    async def index_pdf(self, url) -> list[Document]:
+        # Download the PDF at the url and save it to a tempfile
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.read()
+                    f = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                    f.write(data)
+                    f.close()
+                else:
+                    return "An error occurred while downloading the PDF."
+        # Get the file path of this tempfile.NamedTemporaryFile
+        # Save this temp file to an actual file that we can put into something else to read it
+        documents = SimpleDirectoryReader(input_files=[f.name]).load_data()
+        print("Loaded the PDF document data")
+
+        # Delete the temporary file
+        return documents
+
+    async def index_webpage(self, url, embed_model) -> GPTSimpleVectorIndex:
+        # First try to connect to the URL to see if we can even reach it.
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5) as response:
+                    # Add another entry to links from all_links if the link is not already in it to compensate for the failed request
+                    if response.status not in [200, 203, 202, 204]:
+                        raise ValueError(
+                            "Invalid URL or could not connect to the provided URL."
+                        )
+                    else:
+                        # Detect if the link is a PDF, if it is, we load it differently
+                        if response.headers["Content-Type"] == "application/pdf":
+                            documents = await self.index_pdf(url)
+                            index = GPTSimpleVectorIndex(
+                                documents,
+                                embed_model=embed_model,
+                            )
+                            return index
+        except:
+            raise ValueError("Could not load webpage")
+
         documents = BeautifulSoupWebReader(
             website_extractor=DEFAULT_WEBSITE_EXTRACTOR
         ).load_data(urls=[url])
@@ -296,11 +343,11 @@ class Index_handler:
                         if response.status == 200:
                             content_type = response.headers.get("content-type")
                         else:
-                            await ctx.respond("Failed to get link", ephemeral=True)
+                            await ctx.respond("Failed to get link")
                             return
             except Exception:
                 traceback.print_exc()
-                await ctx.respond("Failed to get link", ephemeral=True)
+                await ctx.respond("Failed to get link")
                 return
 
             # Check if the link contains youtube in it
@@ -308,12 +355,12 @@ class Index_handler:
                 index = await self.loop.run_in_executor(
                     None, partial(self.index_youtube_transcript, link, embedding_model)
                 )
-            elif "pdf" in content_type:
-                index = await self.index_web_pdf(link, embedding_model)
-            else:
+            elif "github" in link:
                 index = await self.loop.run_in_executor(
-                    None, partial(self.index_webpage, link, embedding_model)
+                    None, partial(self.index_github_repository, link, embedding_model)
                 )
+            else:
+                index = await self.index_webpage(link, embedding_model)
             await self.usage_service.update_usage(
                 embedding_model.last_token_usage, embeddings=True
             )
@@ -336,6 +383,7 @@ class Index_handler:
         except Exception:
             await ctx.respond("Failed to set index")
             traceback.print_exc()
+            return
 
         await ctx.respond("Index set")
 
@@ -368,7 +416,7 @@ class Index_handler:
             traceback.print_exc()
 
     async def load_index(
-        self, ctx: discord.ApplicationContext, index, server, user_api_key
+        self, ctx: discord.ApplicationContext, index, server, search, user_api_key
     ):
         if not user_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_key
@@ -380,6 +428,10 @@ class Index_handler:
                 index_file = EnvService.find_shared_file(
                     f"indexes/{ctx.guild.id}/{index}"
                 )
+            elif search:
+                index_file = EnvService.find_shared_file(
+                    f"indexes/{ctx.user.id}_search/{index}"
+                )
             else:
                 index_file = EnvService.find_shared_file(
                     f"indexes/{ctx.user.id}/{index}"
@@ -390,6 +442,7 @@ class Index_handler:
             self.index_storage[ctx.user.id].queryable_index = index
             await ctx.respond("Loaded index")
         except Exception as e:
+            traceback.print_exc()
             await ctx.respond(e)
 
     async def compose_indexes(self, user_id, indexes, name, deep_compose):
@@ -670,21 +723,30 @@ class ComposeModal(discord.ui.View):
                 EnvService.find_shared_file(f"indexes/{str(user_id)}/")
             )
         ]
+        print("Found the indexes, they are ", self.indexes)
 
         # Map everything into the short to long cache
         for index in self.indexes:
-            SHORT_TO_LONG_CACHE[index[:99]] = index
+            if len(index) > 93:
+                index_name = index[:93] + "-" + str(random.randint(0000, 9999))
+                SHORT_TO_LONG_CACHE[index_name] = index
+            else:
+                SHORT_TO_LONG_CACHE[index[:99]] = index
+
+        # Reverse the SHORT_TO_LONG_CACHE index
+        LONG_TO_SHORT_CACHE = {v: k for k, v in SHORT_TO_LONG_CACHE.items()}
 
         # A text entry field for the name of the composed index
         self.name = name
 
         # A discord UI select menu with all the indexes. Limited to 25 entries. For the label field in the SelectOption,
         # cut it off at 100 characters to prevent the message from being too long
-
         self.index_select = discord.ui.Select(
             placeholder="Select index(es) to compose",
             options=[
-                discord.SelectOption(label=str(index)[:99], value=index[:99])
+                discord.SelectOption(
+                    label=LONG_TO_SHORT_CACHE[index], value=LONG_TO_SHORT_CACHE[index]
+                )
                 for index in self.indexes
             ][0:25],
             max_values=len(self.indexes) if len(self.indexes) < 25 else 25,
@@ -701,7 +763,10 @@ class ComposeModal(discord.ui.View):
                     discord.ui.Select(
                         placeholder="Select index(es) to compose",
                         options=[
-                            discord.SelectOption(label=index[:99], value=index[:99])
+                            discord.SelectOption(
+                                label=LONG_TO_SHORT_CACHE[index],
+                                value=LONG_TO_SHORT_CACHE[index],
+                            )
                             for index in self.indexes
                         ][i : i + 25],
                         max_values=len(self.indexes[i : i + 25]),

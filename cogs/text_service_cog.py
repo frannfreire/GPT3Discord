@@ -10,6 +10,7 @@ import json
 
 import discord
 
+from models.deepl_model import TranslationModel
 from models.embed_statics_model import EmbedStatics
 from models.openai_model import Override
 from services.environment_service import EnvService
@@ -34,6 +35,8 @@ else:
 USER_INPUT_API_KEYS = EnvService.get_user_input_api_keys()
 USER_KEY_DB = EnvService.get_api_db()
 CHAT_BYPASS_ROLES = EnvService.get_bypass_roles()
+PRE_MODERATE = EnvService.get_premoderate()
+FORCE_ENGLISH = EnvService.get_force_english()
 
 #
 # Obtain the Moderation table and the General table, these are two SQLite tables that contain
@@ -77,6 +80,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         self.bot = bot
         self.usage_service = usage_service
         self.model = model
+        self.translation_model = TranslationModel()
         self.deletion_queue = deletion_queue
 
         # Data specific to all text based GPT interactions
@@ -111,6 +115,17 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 )
             assert self.CONVERSATION_STARTER_TEXT is not None
 
+            language_detect_file_path = EnvService.find_shared_file(
+                "language_detection_pretext.txt"
+            )
+            # Attempt to read a conversation starter text string from the file.
+            with language_detect_file_path.open("r") as f:
+                self.LANGUAGE_DETECT_STARTER_TEXT = f.read()
+                print(
+                    f"Language detection starter text loaded from {language_detect_file_path}."
+                )
+            assert self.LANGUAGE_DETECT_STARTER_TEXT is not None
+
             conversation_file_path_minimal = EnvService.find_shared_file(
                 "conversation_starter_pretext_minimal.txt"
             )
@@ -138,7 +153,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         self.TEXT_CUTOFF = 1900
         self.EMBED_CUTOFF = 3900
         self.message_queue = message_queue
-        self.conversation_thread_owners = {}
+        self.conversation_thread_owners = defaultdict(list)
 
     async def load_file(self, file, ctx):
         """Take filepath, return content or respond if not found"""
@@ -220,8 +235,15 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             channel_id = ctx.channel.id
         else:
             try:
-                channel_id = self.conversation_thread_owners[normalized_user_id]
+                channel_ids = self.conversation_thread_owners[normalized_user_id]
+                if ctx.channel.id not in channel_ids:
+                    await ctx.reply(
+                        "This is not a conversation thread that you own!",
+                        delete_after=5,
+                    )
+
             except Exception:
+                traceback.print_exc()
                 await ctx.delete(delay=5)
                 await ctx.reply(
                     "Only the conversation starter can end this.", delete_after=5
@@ -230,7 +252,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
 
         # TODO Possible bug here, if both users have a conversation active and one user tries to end the other, it may
         # allow them to click the end button on the other person's thread and it will end their own convo.
-        self.conversation_threads.pop(channel_id)
+        self.conversation_threads.pop(ctx.channel.id)
 
         if isinstance(
             ctx, discord.ApplicationContext
@@ -260,10 +282,12 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         # If at conversation limit then fetch the owner and close the thread for them
         if conversation_limit:
             try:
-                owner_id = list(self.conversation_thread_owners.keys())[
-                    list(self.conversation_thread_owners.values()).index(channel_id)
-                ]
-                self.conversation_thread_owners.pop(owner_id)
+                owner_id = [
+                    owner
+                    for owner, threads in self.conversation_thread_owners.items()
+                    if channel_id in threads
+                ][0]
+                self.conversation_thread_owners[owner_id].remove(ctx.channel.id)
                 # Attempt to close and lock the thread.
                 try:
                     thread = await self.bot.fetch_channel(channel_id)
@@ -275,8 +299,10 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 traceback.print_exc()
         else:
             if normalized_user_id in self.conversation_thread_owners:
-                thread_id = self.conversation_thread_owners[normalized_user_id]
-                self.conversation_thread_owners.pop(normalized_user_id)
+                thread_id = ctx.channel.id
+                self.conversation_thread_owners[normalized_user_id].remove(
+                    ctx.channel.id
+                )
 
                 # Attempt to close and lock the thread.
                 try:
@@ -467,6 +493,8 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                     "You have reached the maximum conversation length. You have ended the conversation with GPT3, and it has ended."
                 )
                 await self.end_conversation(message, conversation_limit=True)
+                return True
+        return False
 
     async def summarize_conversation(self, message, prompt):
         """Takes a conversation history filled prompt and summarizes it to then start a new history with it as the base"""
@@ -547,13 +575,45 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 ).timestamp()
                 await Moderation.moderation_queues[message.guild.id].put(
                     Moderation(message, timestamp)
-                )  # TODO Don't proceed to conversation processing if the message is deleted by moderations.
+                )
+
+        # Language check
+        if FORCE_ENGLISH and len(message.content.split(" ")) > 3:
+            if not await Moderation.force_english_and_respond(
+                message.content, self.LANGUAGE_DETECT_STARTER_TEXT, message
+            ):
+                await message.delete()
+                return
 
         # Process the message if the user is in a conversation
         if await TextService.process_conversation_message(
             self, message, USER_INPUT_API_KEYS, USER_KEY_DB
         ):
             original_message[message.author.id] = message.id
+
+        # If the user tagged the bot and the tag wasn't an @here or @everyone, retrieve the message
+        if f"<@{self.bot.user.id}>" in message.content and not (
+            "@everyone" in message.content or "@here" in message.content
+        ):
+            # Remove the mention from the message
+            prompt = message.content.replace(self.bot.user.mention, "")
+            # If the message is empty, don't process it
+            if len(prompt) < 5:
+                await message.reply(
+                    "This is too short of a prompt to think about. Please be more specific."
+                )
+                return
+
+            await self.ask_command(
+                message,
+                prompt,
+                False,
+                None,
+                None,
+                None,
+                None,
+                from_message_context=True,
+            )
 
     def cleanse_response(self, response_text):
         """Cleans history tokens from response"""
@@ -594,6 +654,16 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             title="GPT3Bot Help", description="The current commands", color=0xC730C7
         )
         embed.add_field(
+            name="/search",
+            value="AI-Assisted google search!",
+            inline=False,
+        )
+        embed.add_field(
+            name="/index",
+            value="Indexing commands for document knowledge and querying",
+            inline=False,
+        )
+        embed.add_field(
             name="/gpt ask",
             value="Ask GPT3 something. Be clear, long, and concise in your prompt. Don't waste tokens.",
             inline=False,
@@ -612,16 +682,6 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             inline=False,
         )
         embed.add_field(
-            name="/system settings",
-            value="Print the current settings of the model",
-            inline=False,
-        )
-        embed.add_field(
-            name="/system settings <model parameter> <value>",
-            value="Change the parameter of the model named by <model parameter> to new value <value>",
-            inline=False,
-        )
-        embed.add_field(
             name="/dalle draw <image prompt>",
             value="Use DALL-E2 to draw an image based on a text prompt",
             inline=False,
@@ -632,13 +692,28 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             inline=False,
         )
         embed.add_field(
+            name="/system settings",
+            value="Print the current settings of the model",
+            inline=False,
+        )
+        embed.add_field(
+            name="/system settings <model parameter> <value>",
+            value="Change the parameter of the model named by <model parameter> to new value <value>",
+            inline=False,
+        )
+        embed.add_field(
             name="/mod",
             value="The automatic moderations service",
             inline=False,
         )
+        embed.add_field(
+            name="/translate",
+            value="Translate from one language to another",
+            inline=False,
+        )
 
         embed.add_field(name="/help", value="See this help text", inline=False)
-        await ctx.respond(embed=embed, ephemeral=True)
+        await ctx.respond(embed=embed, ephemeral=False)
 
     async def set_usage_command(
         self, ctx: discord.ApplicationContext, usage_amount: float
@@ -700,6 +775,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         presence_penalty: float,
         from_ask_action=None,
         from_other_action=None,
+        from_message_context=None,
     ):
         """Command handler. Requests and returns a generation with no extras to the completion endpoint
 
@@ -712,7 +788,9 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             presence_penalty (float): Sets the presence penalty override
             from_action (bool, optional): Enables ephemeral. Defaults to None.
         """
-        user = ctx.user
+        is_context = isinstance(ctx, discord.ApplicationContext)
+
+        user = ctx.user if is_context else ctx.author
         prompt = await self.mention_to_username(ctx, prompt.strip())
 
         user_api_key = None
@@ -721,7 +799,12 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             if not user_api_key:
                 return
 
-        await ctx.defer(ephemeral=private)
+        await ctx.defer(ephemeral=private) if is_context else None
+
+        # If premoderation is enabled, check
+        if PRE_MODERATE:
+            if await Moderation.simple_moderate_and_respond(prompt, ctx):
+                return
 
         overrides = Override(temperature, top_p, frequency_penalty, presence_penalty)
 
@@ -735,6 +818,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             custom_api_key=user_api_key,
             from_ask_action=from_ask_action,
             from_other_action=from_other_action,
+            from_message_context=from_message_context,
         )
 
     async def edit_command(
@@ -769,6 +853,10 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 return
 
         await ctx.defer(ephemeral=private)
+
+        if PRE_MODERATE:
+            if await Moderation.simple_moderate_and_respond(instruction + text, ctx):
+                return
 
         overrides = Override(temperature, top_p, 0, 0)
 
@@ -838,12 +926,17 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         elif not private:
             await ctx.defer()
 
-        if user.id in self.conversation_thread_owners:
-            await ctx.respond(
-                "You've already created a thread, end it before creating a new one",
-                delete_after=5,
-            )
-            return
+        # Check the opener for bad content.
+        if PRE_MODERATE and opener is not None:
+            if await Moderation.simple_moderate_and_respond(opener, ctx):
+                return
+
+        # if user.id in self.conversation_thread_owners:
+        #     await ctx.respond(
+        #         "You've already created a thread, end it before creating a new one",
+        #         delete_after=5,
+        #     )
+        #     return
 
         if private:
             await ctx.respond(
@@ -942,7 +1035,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             )
 
         # Set user as thread owner before sending anything that can error and leave the thread unowned
-        self.conversation_thread_owners[user_id_normalized] = thread.id
+        self.conversation_thread_owners[user_id_normalized].append(thread.id)
         overrides = self.conversation_threads[thread.id].get_overrides()
 
         await thread.send(f"<@{str(ctx.user.id)}> is the thread owner.")
@@ -1001,14 +1094,8 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         """Command handler. Gets the user's thread and ends it"""
         await ctx.defer(ephemeral=True)
         user_id = ctx.user.id
-        try:
-            thread_id = self.conversation_thread_owners[user_id]
-        except Exception:
-            await ctx.respond(
-                "You haven't started any conversations", ephemeral=True, delete_after=10
-            )
-            return
-        if thread_id in self.conversation_threads:
+
+        if ctx.channel.id in self.conversation_threads:
             try:
                 await self.end_conversation(ctx)
             except Exception as e:
@@ -1016,7 +1103,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 traceback.print_exc()
         else:
             await ctx.respond(
-                "You're not in any conversations", ephemeral=True, delete_after=10
+                "This is not a conversation channel.", ephemeral=True, delete_after=10
             )
 
     async def setup_command(self, ctx: discord.ApplicationContext):
