@@ -66,7 +66,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=auto
+            suffix=-base,onlatest=true
+          tags: |
+            type=semver,pattern={{raw}}
+            type=ref,event=branch
+          images: |
+            kaveenk/gpt3discord
+            ghcr.io/${{ github.repository }}
 
       - name: Check if release
         uses: haya14busa/action-cond@v1
@@ -152,7 +160,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=auto
+            suffix=-full,onlatest=true
+          tags: |
+            type=semver,pattern={{raw}}
+            type=ref,event=branch
+          images: |
+            kaveenk/gpt3discord
+            ghcr.io/${{ github.repository }}
 
       - name: Check if release
         uses: haya14busa/action-cond@v1
@@ -212,7 +228,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: |
+            kaveenk/gpt3discord
+            ghcr.io/${{ github.repository }}
 
       - name: Build and push base Docker image
         id: build-and-push-base
