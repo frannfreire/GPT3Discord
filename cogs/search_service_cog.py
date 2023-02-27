@@ -6,6 +6,7 @@ import discord
 from discord.ext import pages
 
 from models.deepl_model import TranslationModel
+from models.embed_statics_model import EmbedStatics
 from models.search_model import Search
 from services.environment_service import EnvService
 from services.moderations_service import Moderation
@@ -18,11 +19,12 @@ PRE_MODERATE = EnvService.get_premoderate()
 
 
 class RedoSearchUser:
-    def __init__(self, ctx, query, search_scope, nodes):
+    def __init__(self, ctx, query, search_scope, nodes, response_mode):
         self.ctx = ctx
         self.query = query
         self.search_scope = search_scope
         self.nodes = nodes
+        self.response_mode = response_mode
 
 
 class SearchService(discord.Cog, name="SearchService"):
@@ -89,6 +91,7 @@ class SearchService(discord.Cog, name="SearchService"):
         search_scope,
         nodes,
         deep,
+        response_mode,
         redo=None,
         from_followup=None,
     ):
@@ -112,22 +115,26 @@ class SearchService(discord.Cog, name="SearchService"):
             not EnvService.get_google_search_api_key()
             or not EnvService.get_google_search_engine_id()
         ):
-            await ctx.respond("The search service is not enabled.")
+            await ctx.respond(
+                embed=EmbedStatics.get_search_failure_embed(
+                    str("The search service is not enabled on this server.")
+                ),
+            )
             return
 
         try:
             response, refined_text = await self.model.search(
-                ctx, query, user_api_key, search_scope, nodes, deep
+                ctx, query, user_api_key, search_scope, nodes, deep, response_mode
             )
-        except ValueError:
+        except ValueError as e:
             await ctx.respond(
-                "The Google Search API returned an error. Check the console for more details.",
+                embed=EmbedStatics.get_search_failure_embed(str(e)),
                 ephemeral=True,
             )
             return
-        except Exception:
+        except Exception as e:
             await ctx.respond(
-                "An error occurred. Check the console for more details.", ephemeral=True
+                embed=EmbedStatics.get_search_failure_embed(str(e)), ephemeral=True
             )
             traceback.print_exc()
             return
@@ -139,6 +146,9 @@ class SearchService(discord.Cog, name="SearchService"):
             flags=re.IGNORECASE,
         )
         urls = "\n".join(f"<{url}>" for url in urls)
+
+        # Deduplicate the urls
+        urls = "\n".join(dict.fromkeys(urls.split("\n")))
 
         if from_followup:
             original_link, followup_question = (
@@ -170,7 +180,9 @@ class SearchService(discord.Cog, name="SearchService"):
             custom_view=SearchView(ctx, self, query_response_message),
         )
 
-        self.redo_users[ctx.user.id] = RedoSearchUser(ctx, query, search_scope, nodes)
+        self.redo_users[ctx.user.id] = RedoSearchUser(
+            ctx, query, search_scope, nodes, response_mode
+        )
 
         await paginator.respond(ctx.interaction)
 
@@ -182,7 +194,7 @@ class SearchView(discord.ui.View):
         search_cog,
         response_text,
     ):
-        super().__init__(timeout=3600)  # 1 hour interval to redo.
+        super().__init__(timeout=None)  # No timeout
         self.search_cog = search_cog
         self.ctx = ctx
         self.response_text = response_text
@@ -219,7 +231,9 @@ class RedoButton(discord.ui.Button["SearchView"]):
     async def callback(self, interaction: discord.Interaction):
         """Redo the search"""
         await interaction.response.send_message(
-            "Redoing search...", ephemeral=True, delete_after=15
+            embed=EmbedStatics.get_search_redo_progress_embed(),
+            ephemeral=True,
+            delete_after=15,
         )
         await self.search_cog.search_command(
             self.search_cog.redo_users[self.ctx.user.id].ctx,
@@ -228,6 +242,7 @@ class RedoButton(discord.ui.Button["SearchView"]):
             self.search_cog.redo_users[self.ctx.user.id].nodes,
             deep=False,
             redo=True,
+            response_mode=self.search_cog.redo_users[self.ctx.user.id].response_mode,
         )
 
 
@@ -285,4 +300,5 @@ class FollowupModal(discord.ui.Modal):
             deep=False,
             redo=True,
             from_followup=FollowupData(message_link, self.children[0].value),
+            response_mode=self.search_cog.redo_users[self.ctx.user.id].response_mode,
         )

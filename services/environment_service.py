@@ -153,7 +153,7 @@ class EnvService:
             print(
                 "TRANSLATOR_ROLES is not defined properly in the environment file!"
                 "Please copy your server's role and put it into TRANSLATOR in the .env file."
-                'For example a line should look like: `TRANSLATOR="Translate"`'
+                'For example a line should look like: `TRANSLATOR_ROLES="Translate"`'
             )
             print("Defaulting to allowing all users to use Translator commands...")
             return [None]
@@ -164,6 +164,32 @@ class EnvService:
             else [translator_roles.lower()]
         )
         return translator_roles
+
+    @staticmethod
+    def get_search_roles():
+        # DALLE_ROLES is a comma separated list of string roles
+        # It can also just be one role
+        # Read these allowed roles and return as a list of strings
+        try:
+            search_roles = os.getenv("SEARCH_ROLES")
+        except Exception:
+            search_roles = None
+
+        if search_roles is None:
+            print(
+                "SEARCH_ROLES is not defined properly in the environment file!"
+                "Please copy your server's role and put it into SEARCH in the .env file."
+                'For example a line should look like: `SEARCH_ROLES="Translate"`'
+            )
+            print("Defaulting to allowing all users to use Search commands...")
+            return [None]
+
+        search_roles = (
+            search_roles.lower().split(",")
+            if "," in search_roles
+            else [search_roles.lower()]
+        )
+        return search_roles
 
     @staticmethod
     def get_gpt_roles():
@@ -287,6 +313,16 @@ class EnvService:
             return False
 
     @staticmethod
+    def get_bot_is_taggable():
+        try:
+            user_input_api_keys = os.getenv("BOT_TAGGABLE")
+            if user_input_api_keys.lower().strip() == "true":
+                return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
     def get_user_key_db_path() -> Union[Path, None]:
         try:
             user_key_db_path = os.getenv("USER_KEY_DB_PATH")
@@ -379,3 +415,19 @@ class EnvService:
             return pinecone_region
         except Exception:
             return "us-west1-gcp"
+
+    @staticmethod
+    def get_max_search_price():
+        try:
+            search_price = float(os.getenv("MAX_SEARCH_PRICE"))
+            return search_price
+        except Exception:
+            return 1.00
+
+    @staticmethod
+    def get_max_deep_compose_price():
+        try:
+            deep_compose_price = float(os.getenv("MAX_DEEP_COMPOSE_PRICE"))
+            return deep_compose_price
+        except Exception:
+            return 3.00

@@ -1,10 +1,12 @@
 import datetime
 import re
 import traceback
+from collections import defaultdict
 
 import aiohttp
 import discord
 from discord.ext import pages
+import unidecode
 
 from models.embed_statics_model import EmbedStatics
 from services.deletion_service import Deletion
@@ -65,11 +67,11 @@ class TextService:
             redo_request (bool, optional): If we're redoing a previous prompt. Defaults to False.
             from_action (bool, optional): If the function is being called from a message action. Defaults to False.
         """
-        new_prompt = (
-            prompt + "\n" + BOT_NAME
+        new_prompt, _new_prompt_clean = (
+            prompt  # + "\n" + BOT_NAME
             if not from_ask_command and not from_edit_command and not redo_request
             else prompt
-        )
+        ), prompt
 
         stop = f"{ctx.author.display_name if user is None else user.display_name}:"
 
@@ -88,7 +90,6 @@ class TextService:
                 converser_cog.pinecone_service
                 and ctx.channel.id in converser_cog.conversation_threads
             ):
-                # Delete "GPTie:  <|endofstatement|>" from the user's conversation history if it exists
                 for item in converser_cog.conversation_threads[ctx.channel.id].history:
                     if item.text.strip() == BOT_NAME + "<|endofstatement|>":
                         converser_cog.conversation_threads[
@@ -99,7 +100,8 @@ class TextService:
                 conversation_id = ctx.channel.id
 
                 # Create an embedding and timestamp for the prompt
-                new_prompt = prompt.encode("ascii", "ignore").decode()
+                # new_prompt = prompt.encode("ascii", "ignore").decode()
+                new_prompt = unidecode.unidecode(new_prompt)
                 prompt_less_author = f"{new_prompt} <|endofstatement|>\n"
 
                 user_displayname = (
@@ -107,7 +109,9 @@ class TextService:
                 )
 
                 new_prompt = f"\n{user_displayname}: {new_prompt} <|endofstatement|>\n"
-                new_prompt = new_prompt.encode("ascii", "ignore").decode()
+
+                # new_prompt = new_prompt.encode("ascii", "ignore").decode()
+                new_prompt = unidecode.unidecode(new_prompt)
 
                 timestamp = int(
                     str(datetime.datetime.now().timestamp()).replace(".", "")
@@ -139,6 +143,7 @@ class TextService:
                         timestamp,
                         custom_api_key=custom_api_key,
                     )
+                    # Print all phrases
 
                     embedding_prompt_less_author = await converser_cog.model.send_embedding_request(
                         prompt_less_author, custom_api_key=custom_api_key
@@ -300,10 +305,10 @@ class TextService:
             elif from_edit_command:
                 if codex:
                     response_text = response_text.strip()
-                    response_text = f"***Prompt: {prompt}***\n***Instruction: {instruction}***\n\n```\n{response_text}\n```"
+                    response_text = f"***Prompt:\n `{prompt}`***\n***Instruction:\n `{instruction}`***\n\n```\n{response_text}\n```"
                 else:
                     response_text = response_text.strip()
-                    response_text = f"***Prompt: {prompt}***\n***Instruction: {instruction}***\n\n{response_text}\n"
+                    response_text = f"***Prompt:\n `{prompt}`***\n***Instruction:\n `{instruction}`***\n\n{response_text}\n"
 
             # If gpt3 tries writing a user mention try to replace it with their name
             response_text = await converser_cog.mention_to_username(ctx, response_text)
@@ -334,12 +339,16 @@ class TextService:
             ):
                 conversation_id = ctx.channel.id
 
+                # A cleaner version for the convo history
+                response_text_clean = str(response_text)
+
                 # Create an embedding and timestamp for the prompt
                 response_text = (
                     "\n" + BOT_NAME + str(response_text) + "<|endofstatement|>\n"
                 )
 
-                response_text = response_text.encode("ascii", "ignore").decode()
+                # response_text = response_text.encode("ascii", "ignore").decode()
+                response_text = unidecode.unidecode(response_text)
 
                 # Print the current timestamp
                 timestamp = int(
@@ -362,6 +371,10 @@ class TextService:
 
             # Cleanse again
             response_text = converser_cog.cleanse_response(response_text)
+
+            converser_cog.full_conversation_history[ctx.channel.id].append(
+                response_text
+            )
 
             # escape any other mentions like @here or @everyone
             response_text = discord.utils.escape_mentions(response_text)
@@ -407,7 +420,9 @@ class TextService:
                         )
                     elif from_edit_command:
                         response_message = await ctx.respond(
-                            response_text,
+                            embed=EmbedStatics.get_edit_command_output_embed(
+                                response_text
+                            ),
                             view=ConversationView(
                                 ctx,
                                 converser_cog,
@@ -465,7 +480,14 @@ class TextService:
                             "Over 2000 characters", delete_after=5
                         )
                 else:
-                    await response_message.edit(content=response_text)
+                    if not from_edit_command:
+                        await response_message.edit(content=response_text)
+                    else:
+                        await response_message.edit(
+                            embed=EmbedStatics.get_edit_command_output_embed(
+                                response_text
+                            )
+                        )
 
             await converser_cog.send_debug_message(
                 converser_cog.generate_debug_message(prompt, response),
@@ -561,42 +583,54 @@ class TextService:
                 # Since this is async, we don't want to allow the user to send another prompt while a conversation
                 # prompt is processing, that'll mess up the conversation history!
                 if message.author.id in converser_cog.awaiting_responses:
-                    message = await message.reply(
+                    resp_message = await message.reply(
                         embed=discord.Embed(
                             title=f"You are already waiting for a response, please wait and speak afterwards.",
                             color=0x808080,
                         )
                     )
+                    try:
+                        await resp_message.channel.trigger_typing()
+                    except:
+                        pass
 
                     # get the current date, add 10 seconds to it, and then turn it into a timestamp.
                     # we need to use our deletion service because this isn't an interaction, it's a regular message.
                     deletion_time = datetime.datetime.now() + datetime.timedelta(
-                        seconds=10
+                        seconds=5
                     )
                     deletion_time = deletion_time.timestamp()
 
-                    deletion_message = Deletion(message, deletion_time)
+                    deletion_message = Deletion(resp_message, deletion_time)
+                    deletion_original_message = Deletion(message, deletion_time)
                     await converser_cog.deletion_queue.put(deletion_message)
+                    await converser_cog.deletion_queue.put(deletion_original_message)
 
                     return
 
                 if message.channel.id in converser_cog.awaiting_thread_responses:
-                    message = await message.reply(
+                    resp_message = await message.reply(
                         embed=discord.Embed(
                             title=f"This thread is already waiting for a response, please wait and speak afterwards.",
                             color=0x808080,
                         )
                     )
+                    try:
+                        await resp_message.channel.trigger_typing()
+                    except:
+                        pass
 
                     # get the current date, add 10 seconds to it, and then turn it into a timestamp.
                     # we need to use our deletion service because this isn't an interaction, it's a regular message.
                     deletion_time = datetime.datetime.now() + datetime.timedelta(
-                        seconds=10
+                        seconds=5
                     )
                     deletion_time = deletion_time.timestamp()
 
-                    deletion_message = Deletion(message, deletion_time)
+                    deletion_message = Deletion(resp_message, deletion_time)
+                    deletion_original_message = Deletion(message, deletion_time)
                     await converser_cog.deletion_queue.put(deletion_message)
+                    await converser_cog.deletion_queue.put(deletion_original_message)
 
                     return
 
@@ -649,8 +683,17 @@ class TextService:
                 title=f"🤖💬 Thinking...",
                 color=0x808080,
             )
+
             thinking_embed.set_footer(text="This may take a few seconds.")
             thinking_message = await message.reply(embed=thinking_embed)
+            try:
+                await message.channel.trigger_typing()
+            except Exception:
+                pass
+            converser_cog.full_conversation_history[message.channel.id].append(prompt)
+
+            if not converser_cog.pinecone_service:
+                primary_prompt += BOT_NAME
 
             await TextService.encapsulated_send(
                 converser_cog,

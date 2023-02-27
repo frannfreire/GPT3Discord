@@ -1,8 +1,10 @@
+import functools
 import os
 import random
 import tempfile
 import traceback
 import asyncio
+import json
 from collections import defaultdict
 
 import aiohttp
@@ -13,11 +15,13 @@ from typing import List, Optional
 from pathlib import Path
 from datetime import date
 
+from discord import InteractionResponse, Interaction
 from discord.ext import pages
 from langchain import OpenAI
 
 from gpt_index.readers import YoutubeTranscriptReader
 from gpt_index.readers.schema.base import Document
+from gpt_index.langchain_helpers.text_splitter import TokenTextSplitter
 
 from gpt_index import (
     GPTSimpleVectorIndex,
@@ -35,18 +39,28 @@ from gpt_index import (
     IndexStructType,
     OpenAIEmbedding,
     GithubRepositoryReader,
+    MockEmbedding,
 )
 from gpt_index.readers.web import DEFAULT_WEBSITE_EXTRACTOR
 
 from gpt_index.composability import ComposableGraph
 
+from models.embed_statics_model import EmbedStatics
 from services.environment_service import EnvService, app_root_path
 
 SHORT_TO_LONG_CACHE = {}
+MAX_DEEP_COMPOSE_PRICE = EnvService.get_max_deep_compose_price()
 
 
 def get_and_query(
-    user_id, index_storage, query, response_mode, nodes, llm_predictor, embed_model
+    user_id,
+    index_storage,
+    query,
+    response_mode,
+    nodes,
+    llm_predictor,
+    embed_model,
+    child_branch_factor,
 ):
     index: [GPTSimpleVectorIndex, ComposableGraph] = index_storage[
         user_id
@@ -54,9 +68,10 @@ def get_and_query(
     if isinstance(index, GPTTreeIndex):
         response = index.query(
             query,
-            child_branch_factor=2,
+            child_branch_factor=child_branch_factor,
             llm_predictor=llm_predictor,
             embed_model=embed_model,
+            use_async=True,
         )
     else:
         response = index.query(
@@ -65,6 +80,7 @@ def get_and_query(
             llm_predictor=llm_predictor,
             embed_model=embed_model,
             similarity_top_k=nodes,
+            use_async=True,
         )
     return response
 
@@ -116,7 +132,8 @@ class IndexData:
             # First, clear all the files inside it
             for file in os.listdir(f"{app_root_path()}/indexes/{user_id}"):
                 os.remove(f"{app_root_path()}/indexes/{user_id}/{file}")
-
+            for file in os.listdir(f"{app_root_path()}/indexes/{user_id}_search"):
+                os.remove(f"{app_root_path()}/indexes/{user_id}_search/{file}")
         except Exception:
             traceback.print_exc()
 
@@ -138,6 +155,23 @@ class Index_handler:
             "answer the question: {query_str}\n"
         )
         self.EMBED_CUTOFF = 2000
+
+    async def rename_index(self, ctx, original_path, rename_path):
+        """Command handler to rename a user index"""
+
+        index_file = EnvService.find_shared_file(original_path)
+        if not index_file:
+            return False
+
+        # Rename the file at f"indexes/{ctx.user.id}/{user_index}" to f"indexes/{ctx.user.id}/{new_name}" using Pathlib
+        try:
+            if not rename_path.endswith(".json"):
+                rename_path = rename_path + ".json"
+            Path(original_path).rename(rename_path)
+            return True
+        except Exception as e:
+            traceback.print_exc()
+            return False
 
     async def paginate_embed(self, response_text):
         """Given a response text make embed pages and return a list of the pages. Codex makes it a codeblock in the embed"""
@@ -165,27 +199,30 @@ class Index_handler:
 
         return pages
 
-    # TODO We need to do predictions below for token usage.
     def index_file(self, file_path, embed_model) -> GPTSimpleVectorIndex:
         document = SimpleDirectoryReader(file_path).load_data()
-        index = GPTSimpleVectorIndex(document, embed_model=embed_model)
+        index = GPTSimpleVectorIndex(document, embed_model=embed_model, use_async=True)
         return index
 
     def index_gdoc(self, doc_id, embed_model) -> GPTSimpleVectorIndex:
         document = GoogleDocsReader().load_data(doc_id)
-        index = GPTSimpleVectorIndex(document, embed_model=embed_model)
+        index = GPTSimpleVectorIndex(document, embed_model=embed_model, use_async=True)
         return index
 
     def index_youtube_transcript(self, link, embed_model):
-        documents = YoutubeTranscriptReader().load_data(ytlinks=[link])
+        try:
+            documents = YoutubeTranscriptReader().load_data(ytlinks=[link])
+        except Exception as e:
+            raise ValueError(f"The youtube transcript couldn't be loaded: {e}")
+
         index = GPTSimpleVectorIndex(
             documents,
             embed_model=embed_model,
+            use_async=True,
         )
         return index
 
     def index_github_repository(self, link, embed_model):
-        print("indexing github repo")
         # Extract the "owner" and the "repo" name from the github link.
         owner = link.split("/")[3]
         repo = link.split("/")[4]
@@ -202,11 +239,18 @@ class Index_handler:
         index = GPTSimpleVectorIndex(
             documents,
             embed_model=embed_model,
+            use_async=True,
         )
         return index
 
     def index_load_file(self, file_path) -> [GPTSimpleVectorIndex, ComposableGraph]:
-        if "composed_deep" in str(file_path):
+        with open(file_path, "r", encoding="utf8") as f:
+            file_contents = f.read()
+            index_dict = json.loads(file_contents)
+            doc_id = index_dict["index_struct_id"]
+            doc_type = index_dict["docstore"]["docs"][doc_id]["__type__"]
+            f.close()
+        if doc_type == "tree":
             index = GPTTreeIndex.load_from_disk(file_path)
         else:
             index = GPTSimpleVectorIndex.load_from_disk(file_path)
@@ -216,6 +260,7 @@ class Index_handler:
         index = GPTSimpleVectorIndex(
             document,
             embed_model=embed_model,
+            use_async=True,
         )
         return index
 
@@ -233,7 +278,6 @@ class Index_handler:
         # Get the file path of this tempfile.NamedTemporaryFile
         # Save this temp file to an actual file that we can put into something else to read it
         documents = SimpleDirectoryReader(input_files=[f.name]).load_data()
-        print("Loaded the PDF document data")
 
         # Delete the temporary file
         return documents
@@ -252,10 +296,16 @@ class Index_handler:
                         # Detect if the link is a PDF, if it is, we load it differently
                         if response.headers["Content-Type"] == "application/pdf":
                             documents = await self.index_pdf(url)
-                            index = GPTSimpleVectorIndex(
-                                documents,
-                                embed_model=embed_model,
+                            index = await self.loop.run_in_executor(
+                                None,
+                                functools.partial(
+                                    GPTSimpleVectorIndex,
+                                    documents=documents,
+                                    embed_model=embed_model,
+                                    use_async=True,
+                                ),
                             )
+
                             return index
         except:
             raise ValueError("Could not load webpage")
@@ -263,7 +313,17 @@ class Index_handler:
         documents = BeautifulSoupWebReader(
             website_extractor=DEFAULT_WEBSITE_EXTRACTOR
         ).load_data(urls=[url])
-        index = GPTSimpleVectorIndex(documents, embed_model=embed_model)
+
+        # index = GPTSimpleVectorIndex(documents, embed_model=embed_model, use_async=True)
+        index = await self.loop.run_in_executor(
+            None,
+            functools.partial(
+                GPTSimpleVectorIndex,
+                documents=documents,
+                embed_model=embed_model,
+                use_async=True,
+            ),
+        )
         return index
 
     def reset_indexes(self, user_id):
@@ -300,9 +360,17 @@ class Index_handler:
                 pass  # No suffix change
             else:
                 await ctx.respond(
-                    "Only accepts text, pdf, images, spreadheets, powerpoint, and audio/video files."
+                    embed=EmbedStatics.get_index_set_failure_embed(
+                        "Only accepts text, pdf, images, spreadheets, powerpoint, and audio/video files."
+                    )
                 )
                 return
+
+            # Send indexing message
+            response = await ctx.respond(
+                embed=EmbedStatics.build_index_progress_embed()
+            )
+
             async with aiofiles.tempfile.TemporaryDirectory() as temp_path:
                 async with aiofiles.tempfile.NamedTemporaryFile(
                     suffix=suffix, dir=temp_path, delete=False
@@ -316,11 +384,23 @@ class Index_handler:
                         embedding_model.last_token_usage, embeddings=True
                     )
 
+            try:
+                price = await self.usage_service.get_price(
+                    embedding_model.last_token_usage, embeddings=True
+                )
+            except:
+                traceback.print_exc()
+                price = "Unknown"
+
             file_name = file.filename
             self.index_storage[ctx.user.id].add_index(index, ctx.user.id, file_name)
-            await ctx.respond("Index added to your indexes.")
-        except Exception:
-            await ctx.respond("Failed to set index")
+            await response.edit(
+                embed=EmbedStatics.get_index_set_success_embed(str(price))
+            )
+        except Exception as e:
+            await ctx.channel.send(
+                embed=EmbedStatics.get_index_set_failure_embed(str(e))
+            )
             traceback.print_exc()
 
     async def set_link_index(
@@ -331,23 +411,32 @@ class Index_handler:
         else:
             os.environ["OPENAI_API_KEY"] = user_api_key
 
-        # TODO Link validation
+        response = await ctx.respond(embed=EmbedStatics.build_index_progress_embed())
         try:
             embedding_model = OpenAIEmbedding()
 
             # Pre-emptively connect and get the content-type of the response
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(link, timeout=2) as response:
-                        print(response.status)
-                        if response.status == 200:
-                            content_type = response.headers.get("content-type")
+                    async with session.get(link, timeout=2) as _response:
+                        print(_response.status)
+                        if _response.status == 200:
+                            content_type = _response.headers.get("content-type")
                         else:
-                            await ctx.respond("Failed to get link")
+                            await response.edit(
+                                embed=EmbedStatics.get_index_set_failure_embed(
+                                    "Invalid URL or could not connect to the provided URL."
+                                )
+                            )
                             return
-            except Exception:
+            except Exception as e:
                 traceback.print_exc()
-                await ctx.respond("Failed to get link")
+                await response.edit(
+                    embed=EmbedStatics.get_index_set_failure_embed(
+                        "Invalid URL or could not connect to the provided URL. "
+                        + str(e)
+                    )
+                )
                 return
 
             # Check if the link contains youtube in it
@@ -365,6 +454,14 @@ class Index_handler:
                 embedding_model.last_token_usage, embeddings=True
             )
 
+            try:
+                price = await self.usage_service.get_price(
+                    embedding_model.last_token_usage, embeddings=True
+                )
+            except:
+                traceback.print_exc()
+                price = "Unknown"
+
             # Make the url look nice, remove https, useless stuff, random characters
             file_name = (
                 link.replace("https://", "")
@@ -380,18 +477,24 @@ class Index_handler:
 
             self.index_storage[ctx.user.id].add_index(index, ctx.user.id, file_name)
 
-        except Exception:
-            await ctx.respond("Failed to set index")
+        except ValueError as e:
+            await response.edit(embed=EmbedStatics.get_index_set_failure_embed(str(e)))
             traceback.print_exc()
             return
 
-        await ctx.respond("Index set")
+        except Exception as e:
+            await response.edit(embed=EmbedStatics.get_index_set_failure_embed(str(e)))
+            traceback.print_exc()
+            return
+
+        await response.edit(embed=EmbedStatics.get_index_set_success_embed(price))
 
     async def set_discord_index(
         self,
         ctx: discord.ApplicationContext,
         channel: discord.TextChannel,
         user_api_key,
+        message_limit: int = 2500,
     ):
         if not user_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_key
@@ -400,7 +503,7 @@ class Index_handler:
 
         try:
             document = await self.load_data(
-                channel_ids=[channel.id], limit=1000, oldest_first=False
+                channel_ids=[channel.id], limit=message_limit, oldest_first=False
             )
             embedding_model = OpenAIEmbedding()
             index = await self.loop.run_in_executor(
@@ -410,9 +513,9 @@ class Index_handler:
                 embedding_model.last_token_usage, embeddings=True
             )
             self.index_storage[ctx.user.id].add_index(index, ctx.user.id, channel.name)
-            await ctx.respond("Index set")
-        except Exception:
-            await ctx.respond("Failed to set index")
+            await ctx.respond(embed=EmbedStatics.get_index_set_success_embed())
+        except Exception as e:
+            await ctx.respond(embed=EmbedStatics.get_index_set_failure_embed(str(e)))
             traceback.print_exc()
 
     async def load_index(
@@ -440,10 +543,37 @@ class Index_handler:
                 None, partial(self.index_load_file, index_file)
             )
             self.index_storage[ctx.user.id].queryable_index = index
-            await ctx.respond("Loaded index")
+            await ctx.respond(embed=EmbedStatics.get_index_load_success_embed())
         except Exception as e:
             traceback.print_exc()
-            await ctx.respond(e)
+            await ctx.respond(embed=EmbedStatics.get_index_load_failure_embed(str(e)))
+
+    async def index_to_docs(
+        self, old_index, chunk_size: int = 4000, chunk_overlap: int = 200
+    ) -> List[Document]:
+        documents = []
+        for doc_id in old_index.docstore.docs.keys():
+            text = ""
+            if isinstance(old_index, GPTSimpleVectorIndex):
+                nodes = old_index.docstore.get_document(doc_id).get_nodes(
+                    old_index.docstore.docs[doc_id].id_map
+                )
+                for node in nodes:
+                    extra_info = node.extra_info
+                    text += f"{node.text} "
+            if isinstance(old_index, GPTTreeIndex):
+                nodes = old_index.docstore.get_document(doc_id).all_nodes.items()
+                for node in nodes:
+                    extra_info = node[1].extra_info
+                    text += f"{node[1].text} "
+            text_splitter = TokenTextSplitter(
+                separator=" ", chunk_size=chunk_size, chunk_overlap=chunk_overlap
+            )
+            text_chunks = text_splitter.split_text(text)
+            for text in text_chunks:
+                document = Document(text, extra_info=extra_info)
+                documents.append(document)
+        return documents
 
     async def compose_indexes(self, user_id, indexes, name, deep_compose):
         # Load all the indexes first
@@ -459,15 +589,35 @@ class Index_handler:
         if deep_compose:
             documents = []
             for _index in index_objects:
-                [
-                    documents.append(_index.docstore.get_document(doc_id))
-                    for doc_id in [docmeta for docmeta in _index.docstore.docs.keys()]
-                    if isinstance(_index.docstore.get_document(doc_id), Document)
-                ]
+                documents.extend(await self.index_to_docs(_index, 256, 20))
             llm_predictor = LLMPredictor(
                 llm=OpenAI(model_name="text-davinci-003", max_tokens=-1)
             )
             embedding_model = OpenAIEmbedding()
+
+            llm_predictor_mock = MockLLMPredictor(4096)
+            embedding_model_mock = MockEmbedding(1536)
+
+            # Run the mock call first
+            await self.loop.run_in_executor(
+                None,
+                partial(
+                    GPTTreeIndex,
+                    documents=documents,
+                    llm_predictor=llm_predictor_mock,
+                    embed_model=embedding_model_mock,
+                ),
+            )
+            total_usage_price = await self.usage_service.get_price(
+                llm_predictor_mock.last_token_usage
+            ) + await self.usage_service.get_price(
+                embedding_model_mock.last_token_usage, True
+            )
+            print("The total composition price is: ", total_usage_price)
+            if total_usage_price > MAX_DEEP_COMPOSE_PRICE:
+                raise ValueError(
+                    "Doing this deep search would be prohibitively expensive. Please try a narrower search scope."
+                )
 
             tree_index = await self.loop.run_in_executor(
                 None,
@@ -476,6 +626,7 @@ class Index_handler:
                     documents=documents,
                     llm_predictor=llm_predictor,
                     embed_model=embedding_model,
+                    use_async=True,
                 ),
             )
 
@@ -491,17 +642,13 @@ class Index_handler:
                 )
 
             # Save the composed index
-            tree_index.save_to_disk(f"indexes/{user_id}/{name}.json")
+            tree_index.save_to_disk(f"indexes/{user_id}/{name}")
 
             self.index_storage[user_id].queryable_index = tree_index
         else:
             documents = []
             for _index in index_objects:
-                [
-                    documents.append(_index.docstore.get_document(doc_id))
-                    for doc_id in [docmeta for docmeta in _index.docstore.docs.keys()]
-                    if isinstance(_index.docstore.get_document(doc_id), Document)
-                ]
+                documents.extend(await self.index_to_docs(_index))
 
             embedding_model = OpenAIEmbedding()
 
@@ -511,6 +658,7 @@ class Index_handler:
                     GPTSimpleVectorIndex,
                     documents=documents,
                     embed_model=embedding_model,
+                    use_async=True,
                 ),
             )
 
@@ -522,10 +670,12 @@ class Index_handler:
                 name = f"composed_index_{date.today().month}_{date.today().day}.json"
 
             # Save the composed index
-            simple_index.save_to_disk(f"indexes/{user_id}/{name}.json")
+            simple_index.save_to_disk(f"indexes/{user_id}/{name}")
             self.index_storage[user_id].queryable_index = simple_index
 
-    async def backup_discord(self, ctx: discord.ApplicationContext, user_api_key):
+    async def backup_discord(
+        self, ctx: discord.ApplicationContext, user_api_key, message_limit
+    ):
         if not user_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_key
         else:
@@ -536,7 +686,7 @@ class Index_handler:
             for c in ctx.guild.text_channels:
                 channel_ids.append(c.id)
             document = await self.load_data(
-                channel_ids=channel_ids, limit=3000, oldest_first=False
+                channel_ids=channel_ids, limit=message_limit, oldest_first=False
             )
             embedding_model = OpenAIEmbedding()
             index = await self.loop.run_in_executor(
@@ -555,9 +705,9 @@ class Index_handler:
                 / f"{ctx.guild.name.replace(' ', '-')}_{date.today().month}_{date.today().day}.json"
             )
 
-            await ctx.respond("Backup saved")
-        except Exception:
-            await ctx.respond("Failed to save backup")
+            await ctx.respond(embed=EmbedStatics.get_index_set_success_embed())
+        except Exception as e:
+            await ctx.respond(embed=EmbedStatics.get_index_set_failure_embed((str(e))))
             traceback.print_exc()
 
     async def query(
@@ -567,11 +717,16 @@ class Index_handler:
         response_mode,
         nodes,
         user_api_key,
+        child_branch_factor,
     ):
         if not user_api_key:
             os.environ["OPENAI_API_KEY"] = self.openai_key
         else:
             os.environ["OPENAI_API_KEY"] = user_api_key
+
+        ctx_response = await ctx.respond(
+            embed=EmbedStatics.build_index_query_progress_embed(query)
+        )
 
         try:
             llm_predictor = LLMPredictor(llm=OpenAI(model_name="text-davinci-003"))
@@ -588,6 +743,7 @@ class Index_handler:
                     nodes,
                     llm_predictor,
                     embedding_model,
+                    child_branch_factor,
                 ),
             )
             print("The last token usage was ", llm_predictor.last_token_usage)
@@ -595,6 +751,18 @@ class Index_handler:
             await self.usage_service.update_usage(
                 embedding_model.last_token_usage, embeddings=True
             )
+
+            try:
+                total_price = round(
+                    await self.usage_service.get_price(llm_predictor.last_token_usage)
+                    + await self.usage_service.get_price(
+                        embedding_model.last_token_usage, True
+                    ),
+                    6,
+                )
+            except:
+                total_price = "Unknown"
+
             query_response_message = f"**Query:**\n\n`{query.strip()}`\n\n**Query response:**\n\n{response.response.strip()}"
             query_response_message = query_response_message.replace(
                 "<|endofstatement|>", ""
@@ -605,11 +773,16 @@ class Index_handler:
                 timeout=None,
                 author_check=False,
             )
+            await ctx_response.edit(
+                embed=EmbedStatics.build_index_query_success_embed(query, total_price)
+            )
             await paginator.respond(ctx.interaction)
         except Exception:
             traceback.print_exc()
-            await ctx.respond(
-                "Failed to send query. You may not have an index set, load an index with /index load",
+            await ctx_response.edit(
+                embed=EmbedStatics.get_index_query_failure_embed(
+                    "Failed to send query. You may not have an index set, load an index with /index load"
+                ),
                 delete_after=10,
             )
 
@@ -698,7 +871,11 @@ class Index_handler:
             os.environ["OPENAI_API_KEY"] = user_api_key
 
         if not self.index_storage[ctx.user.id].has_indexes(ctx.user.id):
-            await ctx.respond("You must load at least one indexes before composing")
+            await ctx.respond(
+                embed=EmbedStatics.get_index_compose_failure_embed(
+                    "You must have at least one index to compose."
+                )
+            )
             return
 
         await ctx.respond(
@@ -810,25 +987,46 @@ class ComposeModal(discord.ui.View):
 
             if len(indexes) < 1:
                 await interaction.response.send_message(
-                    "You must select at least 1 index", ephemeral=True
+                    embed=EmbedStatics.get_index_compose_failure_embed(
+                        "You must select at least 1 index"
+                    ),
+                    ephemeral=True,
                 )
             else:
                 composing_message = await interaction.response.send_message(
-                    "Composing indexes, this may take a long time, you will be DMed when it's ready!",
+                    embed=EmbedStatics.get_index_compose_progress_embed(),
                     ephemeral=True,
-                    delete_after=120,
                 )
                 # Compose the indexes
-                await self.index_cog.compose_indexes(
-                    self.user_id,
-                    indexes,
-                    self.name,
-                    False
-                    if not self.deep_select.values or self.deep_select.values[0] == "no"
-                    else True,
-                )
+                try:
+                    await self.index_cog.compose_indexes(
+                        self.user_id,
+                        indexes,
+                        self.name,
+                        False
+                        if not self.deep_select.values
+                        or self.deep_select.values[0] == "no"
+                        else True,
+                    )
+                except ValueError as e:
+                    await interaction.followup.send(
+                        str(e), ephemeral=True, delete_after=180
+                    )
+                    return False
+                except Exception as e:
+                    await interaction.followup.send(
+                        embed=EmbedStatics.get_index_compose_failure_embed(
+                            "An error occurred while composing the indexes: " + str(e)
+                        ),
+                        ephemeral=True,
+                        delete_after=180,
+                    )
+                    return False
+
                 await interaction.followup.send(
-                    "Composed indexes", ephemeral=True, delete_after=180
+                    embed=EmbedStatics.get_index_compose_success_embed(),
+                    ephemeral=True,
+                    delete_after=180,
                 )
 
                 # Try to direct message the user that their composed index is ready
@@ -840,8 +1038,10 @@ class ComposeModal(discord.ui.View):
                     pass
 
                 try:
-                    await composing_message.delete()
+                    composing_message: Interaction
+                    await composing_message.delete_original_response()
+
                 except:
-                    pass
+                    traceback.print_exc()
         else:
             await interaction.response.defer(ephemeral=True)

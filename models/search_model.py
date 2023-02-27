@@ -20,13 +20,19 @@ from gpt_index import (
     LLMPredictor,
     OpenAIEmbedding,
     SimpleDirectoryReader,
+    GPTTreeIndex,
+    MockLLMPredictor,
+    MockEmbedding,
 )
 from gpt_index.indices.knowledge_graph import GPTKnowledgeGraphIndex
+from gpt_index.prompts.prompt_type import PromptType
 from gpt_index.readers.web import DEFAULT_WEBSITE_EXTRACTOR
 from langchain import OpenAI
 
 from services.environment_service import EnvService, app_root_path
 from services.usage_service import UsageService
+
+MAX_SEARCH_PRICE = EnvService.get_max_search_price()
 
 
 class Search:
@@ -64,54 +70,63 @@ class Search:
         embed = discord.Embed(
             title="Searching the web...",
             description="Refining google search query...",
-            color=0x00FF00,
+            color=discord.Color.blurple(),
         )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
         return embed
 
     def build_search_refined_embed(self, refined_query):
         embed = discord.Embed(
             title="Searching the web...",
-            description="Refined query: "
-            + refined_query
-            + "\n\nRetrieving links from google...",
-            color=0x00FF00,
+            description="Refined query:\n"
+            + f"`{refined_query}`"
+            + "\nRetrieving links from google...",
+            color=discord.Color.blurple(),
         )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
         return embed
 
     def build_search_links_retrieved_embed(self, refined_query):
         embed = discord.Embed(
             title="Searching the web...",
-            description="Refined query: "
-            + refined_query
-            + "\n\nRetrieved links from Google\n\n"
-            "Retrieving webpages...",
-            color=0x00FF00,
+            description="Refined query:\n" + f"`{refined_query}`"
+            "\nRetrieving webpages...",
+            color=discord.Color.blurple(),
         )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
+
         return embed
 
     def build_search_webpages_retrieved_embed(self, refined_query):
         embed = discord.Embed(
             title="Searching the web...",
-            description="Refined query: "
-            + refined_query
-            + "\n\nRetrieved links from Google\n\n"
-            "Retrieved webpages\n\n"
-            "Indexing...",
-            color=0x00FF00,
+            description="Refined query:\n" + f"`{refined_query}`" "\nIndexing...",
+            color=discord.Color.blurple(),
         )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
+
         return embed
 
     def build_search_indexed_embed(self, refined_query):
         embed = discord.Embed(
             title="Searching the web...",
-            description="Refined query: "
-            + refined_query
-            + "\n\nRetrieved links from Google\n\n"
-            "Retrieved webpages\n\n"
-            "Indexed\n\n"
-            "Thinking about your question...",
-            color=0x00FF00,
+            description="Refined query:\n" + f"`{refined_query}`"
+            "\nThinking about your question...",
+            color=discord.Color.blurple(),
         )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
+
+        return embed
+
+    def build_search_final_embed(self, refined_query, price):
+        embed = discord.Embed(
+            title="Searching the web...",
+            description="Refined query:\n" + f"`{refined_query}`"
+            "\nDone!\n||The total price was $" + price + "||",
+            color=discord.Color.blurple(),
+        )
+        embed.set_thumbnail(url="https://i.imgur.com/txHhNzL.png")
+
         return embed
 
     def index_webpage(self, url) -> list[Document]:
@@ -130,13 +145,12 @@ class Search:
                     f.write(data)
                     f.close()
                 else:
-                    return "An error occurred while downloading the PDF."
+                    raise ValueError("Could not download PDF")
         # Get the file path of this tempfile.NamedTemporaryFile
         # Save this temp file to an actual file that we can put into something else to read it
         documents = SimpleDirectoryReader(input_files=[f.name]).load_data()
         for document in documents:
             document.extra_info = {"URL": url}
-        print("Loaded the PDF document data")
 
         # Delete the temporary file
         return documents
@@ -155,11 +169,7 @@ class Search:
                         [item["link"] for item in data["items"]],
                     )
                 else:
-                    print(
-                        "The Google Search API returned an error: "
-                        + str(response.status)
-                    )
-                    return ["An error occurred while searching.", None]
+                    raise ValueError("Error while retrieving links")
 
     async def try_edit(self, message, embed):
         try:
@@ -183,6 +193,7 @@ class Search:
         search_scope,
         nodes,
         deep,
+        response_mode,
         redo=None,
     ):
         DEFAULT_SEARCH_NODES = 1
@@ -191,6 +202,9 @@ class Search:
         else:
             os.environ["OPENAI_API_KEY"] = user_api_key
 
+        # Initialize the search cost
+        price = 0
+
         if ctx:
             in_progress_message = (
                 await ctx.respond(embed=self.build_search_started_embed())
@@ -198,7 +212,6 @@ class Search:
                 else await ctx.channel.send(embed=self.build_search_started_embed())
             )
 
-        llm_predictor = LLMPredictor(llm=OpenAI(model_name="text-davinci-003"))
         try:
             llm_predictor_presearch = OpenAI(
                 max_tokens=50,
@@ -208,12 +221,16 @@ class Search:
             )
 
             # Refine a query to send to google custom search API
-            query_refined = llm_predictor_presearch.generate(
-                prompts=[
-                    f"You are to be given a search query for google. Change the query such that putting it into the Google Custom Search API will return the most relevant websites to assist in answering the original query. If the original query is inferring knowledge about the current day, insert the current day into the refined prompt. If the original query is inferring knowledge about the current month, insert the current month and year into the refined prompt. If the original query is inferring knowledge about the current year, insert the current year into the refined prompt. Generally, if the original query is inferring knowledge about something that happened recently, insert the current month into the refined query. Avoid inserting a day, month, or year for queries that purely ask about facts and about things that don't have much time-relevance. The current date is {str(datetime.now().date())}. Do not insert the current date if not neccessary. Respond with only the refined query for the original query. Don’t use punctuation or quotation marks.\n\nExamples:\n---\nOriginal Query: ‘Who is Harald Baldr?’\nRefined Query: ‘Harald Baldr biography’\n---\nOriginal Query: ‘What happened today with the Ohio train derailment?’\nRefined Query: ‘Ohio train derailment details {str(datetime.now().date())}’\n---\nOriginal Query: ‘Is copper in drinking water bad for you?’\nRefined Query: ‘copper in drinking water adverse effects’\n---\nOriginal Query: What's the current time in Mississauga?\nRefined Query: current time Mississauga\nNow, refine the user input query.\nOriginal Query: {query}\nRefined Query:"
-                ]
+            prompt = f"You are to be given a search query for google. Change the query such that putting it into the Google Custom Search API will return the most relevant websites to assist in answering the original query. If the original query is inferring knowledge about the current day, insert the current day into the refined prompt. If the original query is inferring knowledge about the current month, insert the current month and year into the refined prompt. If the original query is inferring knowledge about the current year, insert the current year into the refined prompt. Generally, if the original query is inferring knowledge about something that happened recently, insert the current month into the refined query. Avoid inserting a day, month, or year for queries that purely ask about facts and about things that don't have much time-relevance. The current date is {str(datetime.now().date())}. Do not insert the current date if not neccessary. Respond with only the refined query for the original query. Don’t use punctuation or quotation marks.\n\nExamples:\n---\nOriginal Query: ‘Who is Harald Baldr?’\nRefined Query: ‘Harald Baldr biography’\n---\nOriginal Query: ‘What happened today with the Ohio train derailment?’\nRefined Query: ‘Ohio train derailment details {str(datetime.now().date())}’\n---\nOriginal Query: ‘Is copper in drinking water bad for you?’\nRefined Query: ‘copper in drinking water adverse effects’\n---\nOriginal Query: What's the current time in Mississauga?\nRefined Query: current time Mississauga\nNow, refine the user input query.\nOriginal Query: {query}\nRefined Query:"
+            query_refined = await llm_predictor_presearch.agenerate(
+                prompts=[prompt],
             )
             query_refined_text = query_refined.generations[0][0].text
+
+            price += await self.usage_service.get_price(
+                query_refined.llm_output.get("token_usage").get("total_tokens")
+            )
+
         except Exception as e:
             traceback.print_exc()
             query_refined_text = query
@@ -246,19 +263,17 @@ class Search:
             pdf = False
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(link, timeout=2) as response:
+                    async with session.get(link, timeout=1) as response:
                         # Add another entry to links from all_links if the link is not already in it to compensate for the failed request
                         if response.status not in [200, 203, 202, 204]:
                             for link2 in all_links:
                                 if link2 not in links:
-                                    print("Found a replacement link")
                                     links.append(link2)
                                     break
                             continue
                         # Follow redirects
                         elif response.status in [301, 302, 303, 307, 308]:
                             try:
-                                print("Adding redirect")
                                 links.append(response.url)
                                 continue
                             except:
@@ -266,16 +281,13 @@ class Search:
                         else:
                             # Detect if the link is a PDF, if it is, we load it differently
                             if response.headers["Content-Type"] == "application/pdf":
-                                print("Found a PDF at the link " + link)
                                 pdf = True
 
             except:
-                traceback.print_exc()
                 try:
                     # Try to add a link from all_links, this is kind of messy.
                     for link2 in all_links:
                         if link2 not in links:
-                            print("Found a replacement link")
                             links.append(link2)
                             break
                 except:
@@ -307,9 +319,27 @@ class Search:
         )
 
         if not deep:
+            embed_model_mock = MockEmbedding(embed_dim=1536)
+            self.loop.run_in_executor(
+                None,
+                partial(GPTSimpleVectorIndex, documents, embed_model=embed_model_mock),
+            )
+            total_usage_price = await self.usage_service.get_price(
+                embed_model_mock.last_token_usage, True
+            )
+            if total_usage_price > 1.00:
+                raise ValueError(
+                    "Doing this search would be prohibitively expensive. Please try a narrower search scope."
+                )
+
             index = await self.loop.run_in_executor(
                 None,
-                partial(GPTSimpleVectorIndex, documents, embed_model=embedding_model),
+                partial(
+                    GPTSimpleVectorIndex,
+                    documents,
+                    embed_model=embedding_model,
+                    use_async=True,
+                ),
             )
             # save the index to disk if not a redo
             if not redo:
@@ -320,37 +350,76 @@ class Search:
                     else ctx.author.id,
                     query,
                 )
-        else:
-            print("Doing a deep search")
-            llm_predictor_deep = LLMPredictor(
-                llm=OpenAI(model_name="text-davinci-002", temperature=0, max_tokens=-1)
+
+            await self.usage_service.update_usage(
+                embedding_model.last_token_usage, embeddings=True
             )
+            price += total_usage_price
+        else:
+            llm_predictor_deep = LLMPredictor(llm=OpenAI(model_name="text-davinci-003"))
+            # Try a mock call first
+            llm_predictor_mock = MockLLMPredictor(4096)
+            embed_model_mock = MockEmbedding(embed_dim=1536)
+
+            await self.loop.run_in_executor(
+                None,
+                partial(
+                    GPTTreeIndex,
+                    documents,
+                    embed_model=embed_model_mock,
+                    llm_predictor=llm_predictor_mock,
+                ),
+            )
+            total_usage_price = await self.usage_service.get_price(
+                llm_predictor_mock.last_token_usage
+            ) + await self.usage_service.get_price(
+                embed_model_mock.last_token_usage, True
+            )
+            if total_usage_price > MAX_SEARCH_PRICE:
+                await self.try_delete(in_progress_message)
+                raise ValueError(
+                    "Doing this deep search would be prohibitively expensive. Please try a narrower search scope. This deep search indexing would have cost ${:.2f}.".format(
+                        total_usage_price
+                    )
+                )
+
             index = await self.loop.run_in_executor(
                 None,
                 partial(
-                    GPTKnowledgeGraphIndex,
+                    GPTTreeIndex,
                     documents,
-                    chunk_size_limit=512,
-                    max_triplets_per_chunk=2,
                     embed_model=embedding_model,
                     llm_predictor=llm_predictor_deep,
+                    use_async=True,
                 ),
             )
+
+            # llm_predictor_deep = LLMPredictor(
+            #     llm=OpenAI(model_name="text-davinci-002", temperature=0, max_tokens=-1)
+            # )
+            # index = await self.loop.run_in_executor(
+            #     None,
+            #     partial(
+            #         GPTKnowledgeGraphIndex,
+            #         documents,
+            #         chunk_size_limit=512,
+            #         max_triplets_per_chunk=2,
+            #         embed_model=embedding_model,
+            #         llm_predictor=llm_predictor_deep,
+            #     ),
+            # )
             await self.usage_service.update_usage(
                 embedding_model.last_token_usage, embeddings=True
             )
             await self.usage_service.update_usage(
                 llm_predictor_deep.last_token_usage, embeddings=False
             )
+            price += total_usage_price
 
         if ctx:
             await self.try_edit(
                 in_progress_message, self.build_search_indexed_embed(query_refined_text)
             )
-
-        await self.usage_service.update_usage(
-            embedding_model.last_token_usage, embeddings=True
-        )
 
         # Now we can search the index for a query:
         embedding_model.last_token_usage = 0
@@ -365,17 +434,31 @@ class Search:
                     llm_predictor=llm_predictor,
                     similarity_top_k=nodes or DEFAULT_SEARCH_NODES,
                     text_qa_template=self.qaprompt,
+                    use_async=True,
+                    response_mode=response_mode,
                 ),
             )
         else:
+            # response = await self.loop.run_in_executor(
+            #     None,
+            #     partial(
+            #         index.query,
+            #         query,
+            #         include_text=True,
+            #         embed_model=embedding_model,
+            #         llm_predictor=llm_predictor_deep,
+            #         use_async=True,
+            #     ),
+            # )
             response = await self.loop.run_in_executor(
                 None,
                 partial(
                     index.query,
                     query,
-                    include_text=True,
+                    child_branch_factor=2,
+                    llm_predictor=llm_predictor,
                     embed_model=embedding_model,
-                    llm_predictor=llm_predictor_deep,
+                    use_async=True,
                 ),
             )
 
@@ -383,8 +466,14 @@ class Search:
         await self.usage_service.update_usage(
             embedding_model.last_token_usage, embeddings=True
         )
+        price += await self.usage_service.get_price(
+            llm_predictor.last_token_usage
+        ) + await self.usage_service.get_price(embedding_model.last_token_usage, True)
 
         if ctx:
-            await self.try_delete(in_progress_message)
+            await self.try_edit(
+                in_progress_message,
+                self.build_search_final_embed(query_refined_text, str(price)),
+            )
 
         return response, query_refined_text
