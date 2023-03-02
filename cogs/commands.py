@@ -29,6 +29,7 @@ class Commands(discord.Cog, name="Commands"):
         index_cog,
         translations_cog=None,
         search_cog=None,
+        transcribe_cog=None,
     ):
         super().__init__()
         self.bot = bot
@@ -43,6 +44,7 @@ class Commands(discord.Cog, name="Commands"):
         self.index_cog = index_cog
         self.translations_cog = translations_cog
         self.search_cog = search_cog
+        self.transcribe_cog = transcribe_cog
 
     # Create slash command groups
     dalle = discord.SlashCommandGroup(
@@ -74,6 +76,12 @@ class Commands(discord.Cog, name="Commands"):
         description="Custom index commands for the bot",
         guild_ids=ALLOWED_GUILDS,
         checks=[Check.check_index_roles()],
+    )
+    transcribe = discord.SlashCommandGroup(
+        name="transcribe",
+        description="Transcription services using OpenAI Whisper",
+        guild_ids=ALLOWED_GUILDS,
+        checks=[Check.check_index_roles()],  # TODO new role checker for transcribe
     )
 
     #
@@ -310,6 +318,12 @@ class Commands(discord.Cog, name="Commands"):
         name="prompt", description="The prompt to send to GPT3", required=True
     )
     @discord.option(
+        name="model",
+        description="The model to use for the request",
+        required=False,
+        autocomplete=Settings_autocompleter.get_models,
+    )
+    @discord.option(
         name="private", description="Will only be visible to you", required=False
     )
     @discord.option(
@@ -345,6 +359,7 @@ class Commands(discord.Cog, name="Commands"):
         self,
         ctx: discord.ApplicationContext,
         prompt: str,
+        model: str,
         private: bool,
         temperature: float,
         top_p: float,
@@ -359,6 +374,7 @@ class Commands(discord.Cog, name="Commands"):
             top_p,
             frequency_penalty,
             presence_penalty,
+            model=model,
         )
 
     @add_to_group("gpt")
@@ -449,7 +465,7 @@ class Commands(discord.Cog, name="Commands"):
         description="Which model to use with the bot",
         required=False,
         default=False,
-        autocomplete=Settings_autocompleter.get_models,
+        autocomplete=Settings_autocompleter.get_converse_models,
     )
     @discord.option(
         name="temperature",
@@ -665,6 +681,32 @@ class Commands(discord.Cog, name="Commands"):
         self, ctx: discord.ApplicationContext, file: discord.Attachment, link: str
     ):
         await self.index_cog.set_index_command(ctx, file, link)
+
+    @add_to_group("index")
+    @discord.slash_command(
+        name="recurse-link",
+        description="Recursively index a link",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="link",
+        description="A link to create the index from",
+        required=True,
+        input_type=discord.SlashCommandOptionType.string,
+    )
+    @discord.option(
+        name="depth",
+        description="How deep to recurse",
+        required=False,
+        input_type=discord.SlashCommandOptionType.integer,
+        min_value=1,
+        max_value=5,
+    )
+    async def set_recurse_link(
+        self, ctx: discord.ApplicationContext, link: str, depth: int
+    ):
+        await self.index_cog.set_index_link_recurse_command(ctx, link, depth)
 
     @add_to_group("index")
     @discord.slash_command(
@@ -1002,3 +1044,59 @@ class Commands(discord.Cog, name="Commands"):
         await self.search_cog.search_command(
             ctx, query, scope, nodes, deep, response_mode
         )
+
+    # Transcribe commands
+    @add_to_group("transcribe")
+    @discord.slash_command(
+        name="file",
+        description="Transcribe an audio or video file",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="file",
+        description="A file to transcribe",
+        required=True,
+        input_type=discord.SlashCommandOptionType.attachment,
+    )
+    @discord.option(
+        name="temperature",
+        description="The higher the value, the riskier the model will be",
+        required=False,
+        input_type=discord.SlashCommandOptionType.number,
+        max_value=1,
+        min_value=0,
+    )
+    async def transcribe_file(
+        self,
+        ctx: discord.ApplicationContext,
+        file: discord.Attachment,
+        temperature: float,
+    ):
+        await self.transcribe_cog.transcribe_file_command(ctx, file, temperature)
+
+    @add_to_group("transcribe")
+    @discord.slash_command(
+        name="link",
+        description="Transcribe a file link or youtube link",
+        guild_ids=ALLOWED_GUILDS,
+    )
+    @discord.guild_only()
+    @discord.option(
+        name="link",
+        description="A link to transcribe",
+        required=True,
+        input_type=discord.SlashCommandOptionType.string,
+    )
+    @discord.option(
+        name="temperature",
+        description="The higher the value, the riskier the model will be",
+        required=False,
+        input_type=discord.SlashCommandOptionType.number,
+        max_value=1,
+        min_value=0,
+    )
+    async def transcribe_link(
+        self, ctx: discord.ApplicationContext, link: str, temperature: float
+    ):
+        await self.transcribe_cog.transcribe_link_command(ctx, link, temperature)
