@@ -65,6 +65,7 @@ except Exception as e:
     raise e
 
 BOT_NAME = EnvService.get_custom_bot_name()
+BOT_TAGGABLE_ROLES = EnvService.get_gpt_roles()
 
 
 class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
@@ -190,7 +191,11 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
 
             try:
                 welcome_message_response = await self.model.send_request(
-                    query, tokens=self.usage_service.count_tokens(query)
+                    query,
+                    tokens=self.usage_service.count_tokens(query),
+                    is_chatgpt_request=True
+                    if "turbo" in str(self.model.model)
+                    else False,
                 )
                 welcome_message = str(welcome_message_response["choices"][0]["text"])
             except Exception:
@@ -425,9 +430,10 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 first = True
             else:
                 if from_context:
-                    await ctx.send_followup(chunk)
+                    response_message = await ctx.send_followup(chunk)
                 else:
-                    await ctx.channel.send(chunk)
+                    response_message = await ctx.channel.send(chunk)
+        return response_message
 
     async def paginate_embed(self, response_text, codex, prompt=None, instruction=None):
         """Given a response text make embed pages and return a list of the pages. Codex makes it a codeblock in the embed"""
@@ -624,6 +630,12 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             "@everyone" in message.content or "@here" in message.content
         ):
             if not BOT_TAGGABLE:
+                return
+
+            # Check if any of the message author's role names are in BOT_TAGGABLE_ROLES, if not, return
+            if BOT_TAGGABLE_ROLES != [None] and not any(
+                role.name.lower() in BOT_TAGGABLE_ROLES for role in message.author.roles
+            ):
                 return
 
             # Remove the mention from the message
