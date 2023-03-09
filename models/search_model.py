@@ -11,6 +11,7 @@ from pathlib import Path
 import discord
 from bs4 import BeautifulSoup
 import aiohttp
+from langchain.llms import OpenAIChat
 from llama_index import (
     QuestionAnswerPrompt,
     GPTSimpleVectorIndex,
@@ -26,6 +27,7 @@ from llama_index import (
 )
 from llama_index.indices.knowledge_graph import GPTKnowledgeGraphIndex
 from llama_index.langchain_helpers.chatgpt import ChatGPTLLMPredictor
+from llama_index.prompts.chat_prompts import CHAT_REFINE_PROMPT
 from llama_index.prompts.prompt_type import PromptType
 from llama_index.readers.web import DEFAULT_WEBSITE_EXTRACTOR
 from langchain import OpenAI
@@ -184,7 +186,12 @@ class Search:
                         [item["link"] for item in data["items"]],
                     )
                 else:
-                    raise ValueError("Error while retrieving links")
+                    raise ValueError(
+                        "Error while retrieving links, the response returned "
+                        + str(response.status)
+                        + " with the message "
+                        + str(await response.text())
+                    )
 
     async def try_edit(self, message, embed):
         try:
@@ -329,7 +336,9 @@ class Search:
 
         embedding_model = OpenAIEmbedding()
 
-        llm_predictor = ChatGPTLLMPredictor()
+        llm_predictor = LLMPredictor(
+            llm=OpenAIChat(temperature=0, model_name="gpt-3.5-turbo")
+        )
 
         if not deep:
             embed_model_mock = MockEmbedding(embed_dim=1536)
@@ -369,7 +378,9 @@ class Search:
             )
             price += total_usage_price
         else:
-            llm_predictor_deep = ChatGPTLLMPredictor()
+            llm_predictor_deep = LLMPredictor(
+                llm=OpenAIChat(temperature=0, model_name="gpt-3.5-turbo")
+            )
 
             # Try a mock call first
             llm_predictor_mock = MockLLMPredictor(4096)
@@ -451,6 +462,7 @@ class Search:
                     query,
                     embed_model=embedding_model,
                     llm_predictor=llm_predictor,
+                    refine_template=CHAT_REFINE_PROMPT,
                     similarity_top_k=nodes or DEFAULT_SEARCH_NODES,
                     text_qa_template=self.qaprompt,
                     use_async=True,
@@ -458,17 +470,6 @@ class Search:
                 ),
             )
         else:
-            # response = await self.loop.run_in_executor(
-            #     None,
-            #     partial(
-            #         index.query,
-            #         query,
-            #         include_text=True,
-            #         embed_model=embedding_model,
-            #         llm_predictor=llm_predictor_deep,
-            #         use_async=True,
-            #     ),
-            # )
             response = await self.loop.run_in_executor(
                 None,
                 partial(
@@ -476,6 +477,7 @@ class Search:
                     query,
                     embedding_mode="hybrid",
                     llm_predictor=llm_predictor,
+                    refine_template=CHAT_REFINE_PROMPT,
                     include_text=True,
                     embed_model=embedding_model,
                     use_async=True,
@@ -491,8 +493,10 @@ class Search:
             embedding_model.last_token_usage, embeddings=True
         )
         price += await self.usage_service.get_price(
-            llm_predictor.last_token_usage
-        ) + await self.usage_service.get_price(embedding_model.last_token_usage, True)
+            llm_predictor.last_token_usage, chatgpt=True
+        ) + await self.usage_service.get_price(
+            embedding_model.last_token_usage, embeddings=True
+        )
 
         if ctx:
             await self.try_edit(
