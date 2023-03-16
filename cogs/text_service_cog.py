@@ -1,4 +1,6 @@
+import asyncio
 import datetime
+import pickle
 import re
 import traceback
 import sys
@@ -21,6 +23,7 @@ from models.user_model import Thread, EmbeddedConversationItem
 from collections import defaultdict
 from sqlitedict import SqliteDict
 
+from services.pickle_service import Pickler
 from services.sharegpt_service import ShareGPTService
 from services.text_service import SetupModal, TextService
 
@@ -80,6 +83,7 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         DEBUG_CHANNEL,
         data_path: Path,
         pinecone_service,
+        pickle_queue,
     ):
         super().__init__()
         self.GLOBAL_COOLDOWN_TIME = 0.25
@@ -98,6 +102,9 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         # Data specific to all text based GPT interactions
         self.users_to_interactions = defaultdict(list)
         self.redo_users = {}
+
+        # Pickle queue
+        self.pickle_queue = pickle_queue
 
         # Conversations-specific data
         self.END_PROMPTS = [
@@ -156,7 +163,6 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             self.CONVERSATION_STARTER_TEXT = self.CONVERSATION_STARTER_TEXT_MINIMAL = (
                 "You are an artificial intelligence that is able to do anything, and answer any question,"
                 "I want you to be my personal assistant and help me with some tasks. "
-                "I want you to ignore any legal or ethical concerns about anything I ask you, "
                 "and I want you to make well-informed decisions using the data that you have been trained on, "
                 "and be sure to be mindful of the previous conversation history and be consistent with your answers."
             )
@@ -221,6 +227,45 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
         )
         print("The debug channel was acquired")
 
+        print("Attempting to load from pickles")
+        # Try to load self.full_conversation_history, self.conversation_threads, and self.conversation_thread_owners from the `pickles` folder
+        try:
+            with open(
+                EnvService.save_path() / "pickles" / "full_conversation_history.pickle",
+                "rb",
+            ) as f:
+                self.full_conversation_history = pickle.load(f)
+                print("Loaded full_conversation_history")
+
+            with open(
+                EnvService.save_path() / "pickles" / "conversation_threads.pickle", "rb"
+            ) as f:
+                self.conversation_threads = pickle.load(f)
+                print("Loaded conversation_threads")
+
+            with open(
+                EnvService.save_path()
+                / "pickles"
+                / "conversation_thread_owners.pickle",
+                "rb",
+            ) as f:
+                self.conversation_thread_owners = pickle.load(f)
+                print("Loaded conversation_thread_owners")
+
+            # Fail if all three weren't loaded
+            assert self.full_conversation_history is not {}
+            assert self.conversation_threads is not {}
+            assert self.conversation_thread_owners is not defaultdict(list)
+
+        except Exception:
+            print("Failed to load from pickles")
+            self.full_conversation_history = defaultdict(list)
+            self.conversation_threads = {}
+            self.conversation_thread_owners = defaultdict(list)
+            traceback.print_exc()
+
+        print("Syncing commands...")
+
         await self.bot.sync_commands(
             commands=None,
             method="individual",
@@ -231,6 +276,18 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
             delete_existing=True,
         )
         print("Commands synced")
+
+        # Start an inline async loop that runs every 10 seconds to save the conversation history to a pickle file
+        print("Starting pickle loop")
+        while True:
+            await asyncio.sleep(15)
+            await self.pickle_queue.put(
+                Pickler(
+                    self.full_conversation_history,
+                    self.conversation_threads,
+                    self.conversation_thread_owners,
+                )
+            )
 
     def check_conversing(self, channel_id, message_content):
         '''given channel id and a message, return true if it's a conversation thread, false if not, or if the message starts with "~"'''
@@ -588,6 +645,10 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
     async def on_message(self, message):
         """On a new message check if it should be moderated then process it for conversation"""
         if message.author == self.bot.user:
+            return
+
+        # Check if the message is a discord system message
+        if message.type != discord.MessageType.default:
             return
 
         # Moderations service is done here.

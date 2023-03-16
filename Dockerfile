@@ -1,4 +1,4 @@
-ARG PY_VERSION=3.9
+ARG PY_VERSION=3.10
 
 # Build container
 FROM python:${PY_VERSION} as base
@@ -16,7 +16,9 @@ RUN apt-get install -y \
     gcc \
     curl
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
+ARG PATH="/root/.cargo/bin:${PATH}"
+# https://github.com/rust-lang/cargo/issues/10583
+ARG CARGO_NET_GIT_FETCH_WITH_CLI=true
 
 RUN mkdir /install /src
 WORKDIR /install
