@@ -1,3 +1,4 @@
+import asyncio.exceptions
 import datetime
 import re
 import traceback
@@ -154,11 +155,18 @@ class TextService:
                         n=converser_cog.model.num_conversation_lookback,
                     )
 
-                    # When we are in embeddings mode, only the pre-text is contained in converser_cog.conversation_threads[message.channel.id].history, so we
-                    # can use that as a base to build our new prompt
+                    # We use the pretext to build our new history
                     _prompt_with_history = [
                         converser_cog.conversation_threads[ctx.channel.id].history[0]
                     ]
+
+                    # If there's an opener we add it to the history
+                    if converser_cog.conversation_threads[ctx.channel.id].has_opener:
+                        _prompt_with_history += [
+                            converser_cog.conversation_threads[ctx.channel.id].history[
+                                1
+                            ]
+                        ]
 
                     # Append the similar prompts to the prompt with history
                     _prompt_with_history += [
@@ -556,6 +564,16 @@ class TextService:
                 ctx.author.id, ctx.channel.id, from_ask_command, from_edit_command
             )
 
+        except asyncio.exceptions.TimeoutError as e:
+            embed = EmbedStatics.get_api_timeout_embed()
+            if from_context:
+                await ctx.send_followup(embed=embed)
+            else:
+                await ctx.reply(embed=embed)
+            converser_cog.remove_awaiting(
+                ctx.author.id, ctx.channel.id, from_ask_command, from_edit_command
+            )
+
         # Error catching for OpenAI model value errors
         except ValueError as e:
             embed = EmbedStatics.get_invalid_value_embed(e)
@@ -573,12 +591,10 @@ class TextService:
         except Exception as e:
             embed = EmbedStatics.get_general_error_embed(e)
 
-            if not from_context:
-                await ctx.send_followup(embed=embed)
-            elif from_ask_command:
-                await ctx.respond(embed=embed)
-            else:
-                await ctx.reply(embed=embed)
+            try:
+                await ctx.channel.send(embed=embed)
+            except:
+                pass
 
             converser_cog.remove_awaiting(
                 ctx.author.id, ctx.channel.id, from_ask_command, from_edit_command
