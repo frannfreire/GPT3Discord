@@ -1,11 +1,11 @@
-![Docker](https://github.com/Kav-K/GPT3Discord/actions/workflows/build-and-publish-docker.yml/badge.svg)  
-![PyPi](https://github.com/Kav-K/GPT3Discord/actions/workflows/pypi_upload.yml/badge.svg)  
-![Build](https://github.com/Kav-K/GPT3Discord/actions/workflows/build.yml/badge.svg)  
+![Docker](https://github.com/Kav-K/GPTDiscord/actions/workflows/build-and-publish-docker.yml/badge.svg)  
+![PyPi](https://github.com/Kav-K/GPTDiscord/actions/workflows/pypi_upload.yml/badge.svg)  
+![Build](https://github.com/Kav-K/GPTDiscord/actions/workflows/build.yml/badge.svg)  
   
 [![PyPi version](https://badgen.net/pypi/v/gpt3discord/)](https://pypi.org/project/gpt3discord)  
-[![Latest release](https://badgen.net/github/release/Kav-K/GPT3Discord)](https://github.com/Kav-K/GPT3Discord/releases)  
-[![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://GitHub.com/Kav-K/GPT3Discord/graphs/commit-activity)  
-[![GitHub license](https://img.shields.io/github/license/Kav-K/GPT3Discord)](https://github.com/Kav-K/GPT3Discord/blob/master/LICENSE)  
+[![Latest release](https://badgen.net/github/release/Kav-K/GPTDiscord)](https://github.com/Kav-K/GPTDiscord/releases)  
+[![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://GitHub.com/Kav-K/GPTDiscord/graphs/commit-activity)  
+[![GitHub license](https://img.shields.io/github/license/Kav-K/GPTDiscord)](https://github.com/Kav-K/GPTDiscord/blob/master/LICENSE)  
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](http://makeapullrequest.com)  
   
 # Overview
@@ -18,31 +18,42 @@ SUPPORT SERVER FOR BOT SETUP: https://discord.gg/WvAHXDMS7Q (You can try out the
 - [Screenshots](#Screenshots)
 - [Features](#Features)
 - [Commands](#Commands)
-- [Installation](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/INSTALLATION.md)  
--- [DigitalOcean Droplet Guide](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/DROPLET-GUIDE.md) 
--- [OpenAI Token Guide](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/OPENAI-GUIDE.md)
-- [Permanent Memory](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/PERMANENT-MEMORY.md)    
-- [AI-Search](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/AI-SEARCH.md)  
-- [Custom Indexes](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/CUSTOM-INDEXES.md)  
-- [AI-Moderation](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/AI-MODERATION.md)  
-- [Translations](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/TRANSLATIONS.md)  
-- [User-Input API Keys](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/USER-INPUT-KEYS.md)  
-- [Permissions](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/PERMISSIONS.md)  
-- [Language Detection](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/LANGUAGE-DETECTION.md)
-- [Other Minor Features](https://github.com/Kav-K/GPT3Discord/blob/main/detailed_guides/OTHER-MINOR-FEATURES.md)  
+- [Installation](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/INSTALLATION.md)  
+-- [DigitalOcean Droplet Guide](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/DROPLET-GUIDE.md) 
+-- [OpenAI Token Guide](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/OPENAI-GUIDE.md)
+- [Internet Connected Chat](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/INTERNET-CONNECTED-CHAT.md)
+- [Permanent Memory](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/PERMANENT-MEMORY.md)    
+- [AI-Search](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/AI-SEARCH.md)  
+- [Custom Indexes](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/CUSTOM-INDEXES.md)  
+- [AI-Moderation](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/AI-MODERATION.md)  
+- [Translations](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/TRANSLATIONS.md)  
+- [User-Input API Keys](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/USER-INPUT-KEYS.md)  
+- [Permissions](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/PERMISSIONS.md)  
+- [Language Detection](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/LANGUAGE-DETECTION.md)
+- [Other Minor Features](https://github.com/Kav-K/GPTDiscord/blob/main/detailed_guides/OTHER-MINOR-FEATURES.md)  
 
 
 # Screenshots  
   
-<p align="center">  
-<img src="https://i.imgur.com/KeLpDgj.png"/>  
-<img  src="https://i.imgur.com/jLp1T0h.png"/>  
-<img src="https://i.imgur.com/cY4895V.png"/>  
-<img src="https://i.imgur.com/9leCixJ.png"/>  
-  
+<p align="center">
+Internet-connected chat (Google + Wolfram + Link Crawling)<br>
+<img src="https://i.imgur.com/t9BDkJD.png"/><br>
+Regular Chat <br>
+<img src="https://i.imgur.com/KeLpDgj.png"/><br>
+Image generation and optimization<br>
+<img  src="https://i.imgur.com/jLp1T0h.png"/><br>
+AI-based moderation<br>
+<img src="https://i.imgur.com/cY4895V.png"/><br>
+Custom indexing and Document Q&A<br>
+<img src="https://i.imgur.com/9leCixJ.png"/><br>
 </p>  
   
 # Recent Notable Updates  
+
+- **Internet-connected Chat!** - Chat with an instance of GPT3.5 or GPT-4 that's connected to google and wolfram alpha and can browse and access links that you send it!
+<p align="center"/>
+<img src="https://i.imgur.com/t9BDkJD.png"/>
+</p>
 
 - **GPT4 Support for /search and /index** - You can now use GPT4 to do your searching and indexing tasks!
 
@@ -140,12 +151,14 @@ These commands are grouped, so each group has a prefix but you can easily tab co
 
 ### Search Commands
 
-`/search query:<prompt> scope:<number of sites to visit> nodes:<how deep gpt should think>` - Search the internet with GPT assistance!
+`/internet search:<prompt> scope:<number of sites to visit> nodes:<how deep gpt should think>` - Search the internet with GPT assistance!
 
 - The `scope` defines how many top level websites to visit during the search, capped at 6
 - `nodes` defines how many nodes inside the built index after webpage retrieval to use. 
 - Increasing the scope or the nodes will make the requests take longer and will be more expensive, but will usually be more accurate.
   
+`/internet chat search_scope:<number> use_gpt:<True/False>` - Start an internet-connected chat with GPT, connected to Google and Wolfram.
+
 ### Custom Indexes Commands  
   
 This bot supports per-user custom indexes. This means that users can upload files of their choosing, such as PDFs and ask GPT to answer questions based on those files.  
@@ -183,11 +196,11 @@ This bot supports per-user custom indexes. This means that users can upload file
 `/system clear-local` - Clear all the local dalleimages.  
   
 
-# Step-by-Step Guides for GPT3Discord  
+# Step-by-Step Guides for GPTDiscord  
   
-[**GPT3Discord Guides**](https://github.com/Kav-K/GPT3Discord/tree/main/detailed_guides)  
+[**GPTDiscord Guides**](https://github.com/Kav-K/GPTDiscord/tree/main/detailed_guides)  
   
-If you follow the link above, you will now get to detailed step-by-step guides that will help you to install and set up your GPT3Discord bot and its features quickly and easily. If you still run into problems or have suggestions for improving the guides, you can join the [**Discord-Server**](https://discord.gg/WvAHXDMS7Q) and we will try to help you. Keep in mind that the maintainers are volunteers and will try to help you on their schedule.  
+If you follow the link above, you will now get to detailed step-by-step guides that will help you to install and set up your GPTDiscord bot and its features quickly and easily. If you still run into problems or have suggestions for improving the guides, you can join the [**Discord-Server**](https://discord.gg/WvAHXDMS7Q) and we will try to help you. Keep in mind that the maintainers are volunteers and will try to help you on their schedule.  
 
   
 *The number and content of the guides is constantly adapted to current requirements.*  
