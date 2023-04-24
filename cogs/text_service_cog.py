@@ -15,6 +15,7 @@ from discord.ext import pages
 
 from models.deepl_model import TranslationModel
 from models.embed_statics_model import EmbedStatics
+from models.image_understanding_model import ImageUnderstandingModel
 from models.openai_model import Override
 from services.environment_service import EnvService
 from services.message_queue_service import Message
@@ -46,6 +47,7 @@ BOT_TAGGABLE = EnvService.get_bot_is_taggable()
 CHANNEL_CHAT_ROLES = EnvService.get_channel_chat_roles()
 BOT_TAGGABLE_ROLES = EnvService.get_gpt_roles()
 CHANNEL_INSTRUCTION_ROLES = EnvService.get_channel_instruction_roles()
+image_understanding_model = ImageUnderstandingModel()
 
 #
 # Obtain the Moderation table and the General table, these are two SQLite tables that contain
@@ -684,9 +686,12 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 await message.delete()
                 return
 
+        # Get the first file in the message if there is one
+        file = message.attachments[0] if len(message.attachments) > 0 else None
+
         # Process the message if the user is in a conversation
         if await TextService.process_conversation_message(
-            self, message, USER_INPUT_API_KEYS, USER_KEY_DB
+            self, message, USER_INPUT_API_KEYS, USER_KEY_DB, file=file
         ):
             original_message[message.author.id] = message.id
 
@@ -1140,7 +1145,20 @@ class GPT3ComCon(discord.Cog, name="GPT3ComCon"):
                 target = thread
             else:
                 embed_title = f"{user.name}'s conversation with GPT"
-                message_embed = discord.Embed(title=embed_title, color=0x808080)
+                message_embed = discord.Embed(
+                    title=embed_title,
+                    description=f"**Model**: {self.model.model if not model else model}",
+                    color=0x808080,
+                )
+                message_embed.set_thumbnail(url="https://i.imgur.com/asA13vI.png")
+                footer_text = (
+                    "Regular Chat"
+                    if not image_understanding_model.get_is_usable()
+                    else "Regular Chat, Multi-Modal"
+                )
+                message_embed.set_footer(
+                    text=footer_text, icon_url="https://i.imgur.com/asA13vI.png"
+                )
                 message_thread = await ctx.send(embed=message_embed)
                 thread = await message_thread.create_thread(
                     name=user.name + "'s conversation with GPT",

@@ -4,12 +4,15 @@ import re
 import traceback
 from collections import defaultdict
 
+import aiofiles
 import aiohttp
 import discord
+import requests
 from discord.ext import pages
 import unidecode
 
 from models.embed_statics_model import EmbedStatics
+from models.image_understanding_model import ImageUnderstandingModel
 from services.deletion_service import Deletion
 from models.openai_model import Model, Override, Models
 from models.user_model import EmbeddedConversationItem, RedoUser
@@ -18,6 +21,7 @@ from services.moderations_service import Moderation
 
 BOT_NAME = EnvService.get_custom_bot_name()
 PRE_MODERATE = EnvService.get_premoderate()
+image_understanding_model = ImageUnderstandingModel()
 
 
 class TextService:
@@ -229,7 +233,8 @@ class TextService:
                 and tokens > converser_cog.model.summarize_threshold
                 and not from_ask_command
                 and not from_edit_command
-                and not converser_cog.pinecone_service  # This should only happen if we are not doing summarizations.
+                and not converser_cog.pinecone_service
+                # This should only happen if we are not doing summarizations.
             ):
                 # We don't need to worry about the differences between interactions and messages in this block,
                 # because if we are in this block, we can only be using a message object for ctx
@@ -491,7 +496,10 @@ class TextService:
                             custom_view=view,
                             author_check=True,
                         )
-                        response_message = await paginator.respond(ctx.interaction)
+                        try:
+                            response_message = await paginator.respond(ctx.interaction)
+                        except:
+                            response_message = await paginator.send(ctx.channel)
                 else:
                     paginator = None
                     if not from_context:
@@ -638,7 +646,7 @@ class TextService:
 
     @staticmethod
     async def process_conversation_message(
-        converser_cog, message, USER_INPUT_API_KEYS, USER_KEY_DB
+        converser_cog, message, USER_INPUT_API_KEYS, USER_KEY_DB, file=None
     ):
         content = message.content.strip()
         conversing = converser_cog.check_conversing(message.channel.id, content)
@@ -725,6 +733,56 @@ class TextService:
                     await converser_cog.deletion_queue.put(deletion_original_message)
 
                     return
+
+                if file and image_understanding_model.get_is_usable():
+                    thinking_embed = discord.Embed(
+                        title=f"🤖💬 Interpreting attachment...",
+                        color=0x808080,
+                    )
+
+                    thinking_embed.set_footer(text="This may take a few seconds.")
+                    try:
+                        thinking_message = await message.reply(embed=thinking_embed)
+                    except:
+                        traceback.print_exc()
+                        pass
+
+                    try:
+                        await message.channel.trigger_typing()
+                    except Exception:
+                        pass
+                    async with aiofiles.tempfile.NamedTemporaryFile(
+                        delete=False
+                    ) as temp_file:
+                        await file.save(temp_file.name)
+                        try:
+                            image_caption, image_qa, image_ocr = await asyncio.gather(
+                                asyncio.to_thread(
+                                    image_understanding_model.get_image_caption,
+                                    temp_file.name,
+                                ),
+                                asyncio.to_thread(
+                                    image_understanding_model.ask_image_question,
+                                    prompt,
+                                    temp_file.name,
+                                ),
+                                image_understanding_model.do_image_ocr(temp_file.name),
+                            )
+                            prompt = (
+                                f"Image Info-Caption: {image_caption}\nImage Info-QA: {image_qa}\nImage Info-OCR: {image_ocr}\n"
+                                + prompt
+                            )
+                            try:
+                                await thinking_message.delete()
+                            except:
+                                pass
+                        except Exception:
+                            traceback.print_exc()
+                            await message.reply(
+                                "I wasn't able to understand the file you gave me."
+                            )
+                            await thinking_message.delete()
+                            return
 
                 converser_cog.awaiting_responses.append(message.author.id)
                 converser_cog.awaiting_thread_responses.append(message.channel.id)

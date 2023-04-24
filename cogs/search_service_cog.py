@@ -1,6 +1,8 @@
 import datetime
 import io
+import json
 import os
+import sys
 import tempfile
 import traceback
 from typing import Optional, Dict, Any
@@ -15,10 +17,24 @@ from langchain import (
     WolframAlphaAPIWrapper,
     FAISS,
     InMemoryDocstore,
+    LLMChain,
+    ConversationChain,
 )
-from langchain.agents import Tool, initialize_agent, AgentType
+from langchain.agents import (
+    Tool,
+    initialize_agent,
+    AgentType,
+    ZeroShotAgent,
+    AgentExecutor,
+)
 from langchain.chat_models import ChatOpenAI
 from langchain.memory import ConversationBufferMemory, CombinedMemory
+from langchain.prompts import (
+    ChatPromptTemplate,
+    SystemMessagePromptTemplate,
+    MessagesPlaceholder,
+    HumanMessagePromptTemplate,
+)
 from langchain.requests import TextRequestsWrapper, Requests
 from llama_index import (
     GPTSimpleVectorIndex,
@@ -39,6 +55,53 @@ from services.moderations_service import Moderation
 from services.text_service import TextService
 
 from contextlib import redirect_stdout
+
+
+from langchain.agents.conversational_chat.output_parser import ConvoOutputParser
+
+original_parse = ConvoOutputParser.parse
+
+
+def my_parse(self, text):
+    # Remove all pairs of triple backticks from the input. However, don't remove pairs of ```json and ```. Only remove ``` and ``` pairs, maintain the text between the pairs so that only the backticks
+    # are removed and the text is left intact.
+    text_without_triple_backticks = re.sub(
+        r"```(?!json)(.*?)```", r"\1", text, flags=re.DOTALL
+    )
+
+    # Call the original parse() method with the modified input
+    try:
+        result = original_parse(self, text_without_triple_backticks)
+    except Exception:
+        traceback.print_exc()
+        # Take the text and format it like
+        # {
+        #     "action": "Final Answer",
+        #     "action_input": text
+        # }
+        # This will cause the bot to respond with the text as if it were a final answer.
+        if "action_input" not in text_without_triple_backticks:
+            text_without_triple_backticks = f'{{"action": "Final Answer", "action_input": {json.dumps(text_without_triple_backticks)}}}'
+            result = original_parse(self, text_without_triple_backticks)
+
+        else:
+            # Insert "```json" before the opening curly brace
+            text_without_triple_backticks = re.sub(
+                r"({)", r"```json \1", text_without_triple_backticks
+            )
+
+            # Insert "```" after the closing curly brace
+            text_without_triple_backticks = re.sub(
+                r"(})", r"\1 ```", text_without_triple_backticks
+            )
+
+            result = original_parse(self, text_without_triple_backticks)
+
+    return result
+
+
+# Replace the original parse function with the new one
+ConvoOutputParser.parse = my_parse
 
 
 async def capture_stdout(func, *args, **kwargs):
@@ -98,7 +161,13 @@ class CustomTextRequestWrapper(BaseModel):
 
     def get(self, url: str, **kwargs: Any) -> str:
         # the "url" field is actuall some input from the LLM, it is a comma separated string of the url and a boolean value and the original query
-        url, use_gpt4, original_query = url.split(",")
+        try:
+            url, use_gpt4, original_query = url.split(",")
+        except:
+            url = url
+            use_gpt4 = False
+            original_query = "No Original Query Provided"
+
         use_gpt4 = use_gpt4 == "True"
         """GET the URL and return the text."""
         text = self.requests.get(url, **kwargs).text
@@ -306,14 +375,13 @@ class SearchService(discord.Cog, name="SearchService"):
                     used_tools.append("Web Crawler")
 
             except Exception as e:
-                # Try again one more time
-                try:
-                    response = await self.bot.loop.run_in_executor(
-                        None, agent.run, prompt
-                    )
-                except Exception as e:
-                    response = f"Error: {e}"
-                    traceback.print_exc()
+                response = f"Error: {e}"
+                traceback.print_exc()
+                await message.reply(
+                    embed=EmbedStatics.get_internet_chat_failure_embed(response)
+                )
+                self.thread_awaiting_responses.remove(message.channel.id)
+                return
 
             if len(response) > 2000:
                 embed_pages = await self.paginate_chat_embed(response)
@@ -346,7 +414,11 @@ class SearchService(discord.Cog, name="SearchService"):
         message_embed = discord.Embed(
             title=embed_title,
             description=f"The agent will visit and browse **{search_scope}** link(s) every time it needs to access the internet.\nCrawling is enabled, send the bot a link for it to access it!\nModel: {'gpt-3.5-turbo' if not use_gpt4 else 'GPT-4'}\n\nType `end` to stop the conversation",
-            color=0x808080,
+            color=0xBA6093,
+        )
+        message_embed.set_thumbnail(url="https://i.imgur.com/lt5AYJ9.png")
+        message_embed.set_footer(
+            text="Internet Chat", icon_url="https://i.imgur.com/lt5AYJ9.png"
         )
         message_thread = await ctx.send(embed=message_embed)
         thread = await message_thread.create_thread(
@@ -369,13 +441,13 @@ class SearchService(discord.Cog, name="SearchService"):
             Tool(
                 name="Search-Tool",
                 func=search.run,
-                description="useful when you need to answer questions about current events or retrieve information about a topic that may require the internet.",
+                description="useful when you need to answer questions about current events or retrieve information about a topic that may require the internet. The input to this tool is a search query to ask google. Search queries should be less than 8 words. For example, an input could be 'What is the weather like in New York?' and the tool input would be 'weather new york'.",
             ),
             # The requests tool
             Tool(
                 name="Web-Crawling-Tool",
                 func=requests.get,
-                description=f"Useful for when the user provides you with a website link, use this tool to crawl the website and retrieve information from it. The input to this tool is a comma separated list of three values, the first value is the link to crawl for, and the second value is the value of use_gpt4, which is {use_gpt4}, and the third value is the original question that the user asked. For example, an input could be 'https://google.com', False, 'What is this webpage?'",
+                description=f"Useful for when the user provides you with a website link, use this tool to crawl the website and retrieve information from it. The input to this tool is a comma separated list of three values, the first value is the link to crawl for, and the second value is the value of use_gpt4, which is {use_gpt4}, and the third value is the original question that the user asked. For example, an input could be 'https://google.com', False, 'What is this webpage?'. This tool should only be used if a direct link is provided and not in conjunction with other tools.",
             ),
         ]
 
@@ -400,11 +472,11 @@ class SearchService(discord.Cog, name="SearchService"):
 
         if use_gpt4:
             llm = ChatOpenAI(
-                model="gpt-4", temperature=0.7, openai_api_key=OPENAI_API_KEY
+                model="gpt-4", temperature=0, openai_api_key=OPENAI_API_KEY
             )
         else:
             llm = ChatOpenAI(
-                model="gpt-3.5-turbo", temperature=0.7, openai_api_key=OPENAI_API_KEY
+                model="gpt-3.5-turbo", temperature=0, openai_api_key=OPENAI_API_KEY
             )
 
         agent_chain = initialize_agent(

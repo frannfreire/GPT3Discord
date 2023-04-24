@@ -495,6 +495,14 @@ class EnvService:
             return None
 
     @staticmethod
+    def get_replicate_api_key():
+        try:
+            replicate_key = os.getenv("REPLICATE_API_KEY")
+            return replicate_key
+        except Exception:
+            return None
+
+    @staticmethod
     def get_google_search_engine_id():
         try:
             google_search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
@@ -525,3 +533,11 @@ class EnvService:
             return deep_compose_price
         except Exception:
             return 3.00
+
+    @staticmethod
+    def get_google_cloud_project_id():
+        try:
+            google_cloud_project_id = os.getenv("GOOGLE_CLOUD_PROJECT_ID")
+            return google_cloud_project_id
+        except Exception:
+            return None
