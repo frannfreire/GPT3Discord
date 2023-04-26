@@ -56,7 +56,6 @@ from services.text_service import TextService
 
 from contextlib import redirect_stdout
 
-
 from langchain.agents.conversational_chat.output_parser import ConvoOutputParser
 
 original_parse = ConvoOutputParser.parse
@@ -104,12 +103,21 @@ def my_parse(self, text):
 ConvoOutputParser.parse = my_parse
 
 
+class CaptureStdout:
+    def __enter__(self):
+        self.buffer = io.StringIO()
+        self.original_stdout = sys.stdout
+        sys.stdout = self.buffer
+        return self.buffer
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout = self.original_stdout
+
+
 async def capture_stdout(func, *args, **kwargs):
-    buffer = io.StringIO()
-    with redirect_stdout(buffer):
+    with CaptureStdout() as buffer:
         result = await func(*args, **kwargs)
     captured_output = buffer.getvalue()
-    buffer.close()
     return result, captured_output
 
 
